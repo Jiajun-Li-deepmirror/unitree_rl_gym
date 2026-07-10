@@ -28,28 +28,19 @@
 #
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
-import inspect
+from time import time
+import numpy as np
+import os
 
-class BaseConfig:
-    def __init__(self) -> None:
-        """ Initializes all member classes recursively. Ignores all namse starting with '__' (buit-in methods)."""
-        self.init_member_classes(self)
-    
-    @staticmethod
-    def init_member_classes(obj):
-        # iterate over all attributes names
-        for key in dir(obj):
-            # disregard builtin attributes
-            # if key.startswith("__"):
-            if key=="__class__":
-                continue
-            # get the corresponding attribute object
-            var =  getattr(obj, key)
-            # check if it the attribute is a class
-            if inspect.isclass(var):
-                # instantate the class
-                i_var = var()
-                # set the attribute to the instance instead of the type
-                setattr(obj, key, i_var)
-                # recursively init members of the attribute
-                BaseConfig.init_member_classes(i_var)
+from isaacgym.torch_utils import *
+from isaacgym import gymtorch, gymapi, gymutil
+
+import torch
+from typing import Tuple, Dict
+from legged_gym.envs import LeggedRobot
+
+class Cassie(LeggedRobot):
+    def _reward_no_fly(self):
+        contacts = self.contact_forces[:, self.feet_indices, 2] > 0.1
+        single_contact = torch.sum(1.*contacts, dim=1)==1
+        return 1.*single_contact

@@ -24,6 +24,9 @@ class G1RoughCfg( LeggedRobotCfg ):
         num_privileged_obs = 50
         num_actions = 12
 
+    class terrain( LeggedRobotCfg.terrain ):
+        mesh_type = 'plane'
+        measure_heights = False
 
     class domain_rand(LeggedRobotCfg.domain_rand):
         randomize_friction = True
@@ -103,7 +106,7 @@ class G1RoughCfgPPO( LeggedRobotCfgPPO ):
         entropy_coef = 0.01
     class runner( LeggedRobotCfgPPO.runner ):
         policy_class_name = "ActorCriticRecurrent"
-        max_iterations = 10000
+        max_iterations = 10001
         run_name = ''
         experiment_name = 'g1'
 

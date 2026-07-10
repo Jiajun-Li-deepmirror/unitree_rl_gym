@@ -38,7 +38,10 @@ class H1_2RoughCfg(LeggedRobotCfg):
         num_observations = 47
         num_privileged_obs = 50
         num_actions = 12
-      
+
+    class terrain( LeggedRobotCfg.terrain ):
+        mesh_type = 'plane'
+        measure_heights = False
 
     class control(LeggedRobotCfg.control):
         # PD Drive parameters:
@@ -125,6 +128,6 @@ class H1_2RoughCfgPPO(LeggedRobotCfgPPO):
         entropy_coef = 0.01
     class runner( LeggedRobotCfgPPO.runner ):
         policy_class_name = "ActorCriticRecurrent"
-        max_iterations = 10000
+        max_iterations = 10001
         run_name = ''
         experiment_name = 'h1_2'
