@@ -180,6 +180,7 @@ class LeggedRobotCfg(BaseConfig):
         ref_env = 0
         pos = [10, 0, 6]  # [m]
         lookat = [11., 5, 3.]  # [m]
+        debug_viz = True # draw debug visualizations (e.g. height-scan points) when a viewer is open
 
     class sim:
         dt =  0.005
