@@ -82,20 +82,12 @@ class GO2Stairs(LeggedRobot):
         self.rigid_body_state = gymtorch.wrap_tensor(rigid_body_state).view(self.num_envs, -1, 13)
 
     def _create_envs(self):
-        """Same as the base class, plus (only when cfg.depth_camera.use_camera):
-        one depth camera per env, rigidly attached to the "base" body. This is
-        prep for the depth+GRU student -- not wired into observations/reward
-        anywhere yet. self.camera_handles is always defined (empty when the
-        camera is off) so other code can check it unconditionally."""
         super()._create_envs()
         self.camera_handles = []
         if not self.cfg.depth_camera.use_camera:
             return
 
         cam = self.cfg.depth_camera
-        # proportional downscale from the native datasheet resolution -- keeps the
-        # width/height ratio (and thus the horizontal_fov/vertical_fov mapping
-        # above) correct while cutting render cost/GPU memory per env.
         self.camera_image_width = max(1, int(round(cam.native_image_width * cam.resolution_scale)))
         self.camera_image_height = max(1, int(round(cam.native_image_height * cam.resolution_scale)))
         camera_props = gymapi.CameraProperties()
@@ -107,26 +99,9 @@ class GO2Stairs(LeggedRobot):
         camera_props.enable_tensors = True
 
         local_transform = gymapi.Transform()
-        # z offset relative to the base body origin: mount_height is "camera
-        # height above ground in nominal stance", and base_height_target (our own
-        # reward's nominal standing height) is the least fragile reference we have
-        # for how high the base origin sits above the ground -- init_state.pos[2]
-        # is just the pre-settling spawn height, not the equilibrium standing
-        # height, so it can't be used for this the way it might look like it should.
         local_transform.p = gymapi.Vec3(cam.mount_forward_offset, 0.0,
                                          cam.mount_height - self.cfg.rewards.base_height_target)
-        # Matches the isaacgym docs' attach_camera_to_body example convention
-        # (rotate about local +Y). NOT yet visually verified on this machine
-        # (GPU was busy) -- once a viewer is available, confirm positive
-        # camera_pitch_deg actually tilts the view down toward the ground and
-        # flip the sign here if it instead tilts up.
-        #
-        # This is independent from the height-scan's geometry (see
-        # _init_height_points): the height-scan is now a fixed near-field trapezoid
-        # (not derived from this camera transform at all), so this pitch only
-        # affects what the real depth image shows, e.g. trading close-up ground
-        # detail for farther look-ahead -- tune once there's visual feedback on
-        # what the depth image actually looks like.
+
         local_transform.r = gymapi.Quat.from_axis_angle(gymapi.Vec3(0, 1, 0), np.deg2rad(cam.camera_pitch_deg))
 
         for i in range(self.num_envs):
@@ -152,13 +127,6 @@ class GO2Stairs(LeggedRobot):
             import cv2
         except ImportError:
             return
-        # _draw_debug_vis's height-scan/foot spheres (drawn via gym.add_lines) are
-        # actual scene-space geometry, not a viewer-only HUD overlay -- they linger
-        # from the previous step's post_physics_step call and would otherwise show
-        # up as phantom floating objects in the depth image. Clear them right before
-        # the camera renders; the interactive viewer already drew this frame's debug
-        # vis before we get here (see render()), so this doesn't affect what you see
-        # in the viewer, only what the depth camera captures.
         self.gym.clear_lines(self.viewer)
         self.gym.render_all_camera_sensors(self.sim)
         self.gym.start_access_image_tensors(self.sim)
@@ -184,7 +152,7 @@ class GO2Stairs(LeggedRobot):
     def _reward_no_fly(self):
         contact = self.contact_forces[:, self.feet_indices, 2] > 1.
         num_contact = torch.sum(contact.float(), dim=1)
-        return (num_contact >= 2).float()
+        return (num_contact >= 1).float()
 
     def _reward_feet_edge(self):
         feet_at_edge = self._lookup_edge_mask(self.rigid_body_state[:, self.feet_indices, :2])
@@ -205,16 +173,6 @@ class GO2Stairs(LeggedRobot):
         return torch.square(base_height - self.cfg.rewards.base_height_target) * (num_contact > 0)
 
     def _draw_debug_vis(self):
-        """Same height-scan point cloud as the base class's visualization, plus:
-          - each height-scan point turns red instead of yellow when it lands on
-            an edge_mask cell, so the edge classification is visible directly
-            over the local terrain patch each robot is scanning.
-          - each foot gets its own marker: orange when _reward_feet_edge would
-            currently penalize it (in contact AND on an edge cell), green
-            otherwise. Uses the same _lookup_edge_mask() the reward itself
-            uses, so the visualization can't silently drift from what's
-            actually being penalized.
-        """
         if not self.terrain.cfg.measure_heights:
             return
         self.gym.clear_lines(self.viewer)
@@ -276,14 +234,6 @@ class GO2Stairs(LeggedRobot):
         )
 
     def _init_height_points(self):
-        """Fixed trapezoid, not a camera-FOV ground projection: short (near) edge
-        at x=near_edge_x with half-width near_edge_half_width (the front-foot
-        stance width), long (far) edge depth_range farther out, side edges
-        angled by depth_camera.horizontal_fov/2 (the only thing still shared
-        with the camera config -- see the height_scan config comment). Covers
-        less area than the real camera can see (some of it outside the
-        camera's FOV/range entirely) in exchange for much denser sampling
-        where footstep decisions actually happen."""
         hs = self.cfg.height_scan
         half_hfov = np.deg2rad(self.cfg.depth_camera.horizontal_fov) / 2
         near_x = hs.near_edge_x
@@ -340,7 +290,7 @@ class GO2Stairs(LeggedRobot):
         if torch.mean(self.episode_sums["tracking_lin_vel"][env_ids]) / self.max_episode_length > 0.8 * self.reward_scales["tracking_lin_vel"]:
             self.command_ranges["lin_vel_x"][0] = 0.
             self.command_ranges["lin_vel_x"][1] = np.clip(
-                self.command_ranges["lin_vel_x"][1] + 0.5, 0., self.cfg.commands.max_curriculum)
+                self.command_ranges["lin_vel_x"][1] + 0.1, 0., self.cfg.commands.max_curriculum)
 
     def _resample_commands(self, env_ids):
         self.commands[env_ids, 0] = torch_rand_float(

@@ -10,11 +10,11 @@ class GO2StairsCfg( GO2RoughCfg ):
         terrain_proportions = [0.05, 0.05, 0.4, 0.4, 0.1]
 
     class commands( GO2RoughCfg.commands ):
-        curriculum = True
+        curriculum = False
         max_curriculum = 1.2
         heading_command = True
         class ranges( GO2RoughCfg.commands.ranges ):
-            lin_vel_x = [0.0, 0.6]
+            lin_vel_x = [0.0, 1.2]
             lin_vel_y = [0.0, 0.0]
             ang_vel_yaw = [-0.75, 0.75]
             heading = [-3.14, 3.14]
@@ -22,11 +22,11 @@ class GO2StairsCfg( GO2RoughCfg ):
     class rewards( GO2RoughCfg.rewards ):
         edge_height_threshold_m = 0.03
         class scales( GO2RoughCfg.rewards.scales ):
-            feet_contact_forces = -0.01
-            feet_slip = -0.04
-            no_fly = 0.25
+            # feet_contact_forces = -0.01   # was already small/well-behaved, low risk
+            # feet_slip = -0.04             # was already small/well-behaved, low risk
+            # no_fly = 0.1                  # cut from 0.25; also now >=1 contact not >=2 (see _reward_no_fly)
+            feet_edge = -0.25             # cut from -1.0, was ~3-5x too large relative to tracking rewards
             base_height = -1.0
-            feet_edge = -1.0
 
     class height_scan:
         near_edge_x = 0.2            
