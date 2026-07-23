@@ -152,7 +152,7 @@ class GO2Stairs(LeggedRobot):
     def _reward_no_fly(self):
         contact = self.contact_forces[:, self.feet_indices, 2] > 1.
         num_contact = torch.sum(contact.float(), dim=1)
-        return (num_contact >= 1).float()
+        return (num_contact >= 2).float()
 
     def _reward_feet_edge(self):
         feet_at_edge = self._lookup_edge_mask(self.rigid_body_state[:, self.feet_indices, :2])

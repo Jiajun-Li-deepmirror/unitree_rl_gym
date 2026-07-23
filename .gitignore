@@ -159,7 +159,7 @@ cython_debug/
 .vscode
 
 # logs
-logs
+logs/
 isaacgym/
 
 libtorch/
