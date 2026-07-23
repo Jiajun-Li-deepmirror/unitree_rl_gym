@@ -137,6 +137,8 @@ class GO2Stairs(LeggedRobot):
         # and normalize [min_range, max_range] -> [0, 255] for display.
         d = torch.clamp(depth, min=-cam.max_range, max=-cam.min_range)
         d = -d
+        noise = torch.randn_like(d) * (cam.noise_relative_std * d)
+        d = torch.clamp(d + noise, min=cam.min_range, max=cam.max_range)
         normalized = (d - cam.min_range) / max(cam.max_range - cam.min_range, 1e-6) * 255.0
         img = normalized.cpu().numpy().astype(np.uint8)
         self.gym.end_access_image_tensors(self.sim)

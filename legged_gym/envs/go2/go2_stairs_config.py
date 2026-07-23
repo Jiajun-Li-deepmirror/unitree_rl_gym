@@ -22,8 +22,8 @@ class GO2StairsCfg( GO2RoughCfg ):
     class rewards( GO2RoughCfg.rewards ):
         edge_height_threshold_m = 0.03
         class scales( GO2RoughCfg.rewards.scales ):
-            # feet_contact_forces = -0.01   # was already small/well-behaved, low risk
-            # feet_slip = -0.04             # was already small/well-behaved, low risk
+            # feet_contact_forces = -0.01
+            # feet_slip = -0.04
             no_fly = 0.1
             feet_edge = -0.25
             base_height = -1.0
@@ -49,6 +49,11 @@ class GO2StairsCfg( GO2RoughCfg ):
         native_image_height = 640
         resolution_scale = 0.25
         fps = 15
+
+        # Gaussian depth noise, std = noise_relative_std * measured_distance --
+        # matches the datasheet's "<2% accuracy at 3m" spec. Dropout/latency
+        # modeling not done yet, noise only for now.
+        noise_relative_std = 0.02
 
 class GO2StairsCfgPPO( GO2RoughCfgPPO ):
     class policy( GO2RoughCfgPPO.policy ):
