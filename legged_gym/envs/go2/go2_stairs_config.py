@@ -26,7 +26,8 @@ class GO2StairsCfg( GO2RoughCfg ):
             # feet_slip = -0.04
             no_fly = 0.1
             feet_edge = -0.25
-            base_height = -1.0
+            # base_height = -1.0
+            hip_default_pose = -0.05
 
     class height_scan:
         near_edge_x = 0.2            
@@ -38,10 +39,10 @@ class GO2StairsCfg( GO2RoughCfg ):
     class depth_camera:
         horizontal_fov = 58.0
         vertical_fov = 87.0
-        min_range = 0.19
+        min_range = 1e-6
         max_range = 3.5
         mount_forward_offset = 0.30
-        mount_height = 0.28
+        mount_height_offset = 0.1
         camera_pitch_deg = 20.0
 
         use_camera = False
@@ -50,9 +51,6 @@ class GO2StairsCfg( GO2RoughCfg ):
         resolution_scale = 0.25
         fps = 15
 
-        # Gaussian depth noise, std = noise_relative_std * measured_distance --
-        # matches the datasheet's "<2% accuracy at 3m" spec. Dropout/latency
-        # modeling not done yet, noise only for now.
         noise_relative_std = 0.02
 
 class GO2StairsCfgPPO( GO2RoughCfgPPO ):

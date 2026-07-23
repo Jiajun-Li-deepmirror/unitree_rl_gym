@@ -80,6 +80,9 @@ class GO2Stairs(LeggedRobot):
         rigid_body_state = self.gym.acquire_rigid_body_state_tensor(self.sim)
         # shape: num_envs, num_bodies, 13 (pos[0:3], quat[3:7], lin_vel[7:10], ang_vel[10:13])
         self.rigid_body_state = gymtorch.wrap_tensor(rigid_body_state).view(self.num_envs, -1, 13)
+        self.hip_dof_indices = torch.tensor(
+            [i for i, name in enumerate(self.dof_names) if "hip" in name],
+            dtype=torch.long, device=self.device)
 
     def _create_envs(self):
         super()._create_envs()
@@ -99,8 +102,7 @@ class GO2Stairs(LeggedRobot):
         camera_props.enable_tensors = True
 
         local_transform = gymapi.Transform()
-        local_transform.p = gymapi.Vec3(cam.mount_forward_offset, 0.0,
-                                         cam.mount_height - self.cfg.rewards.base_height_target)
+        local_transform.p = gymapi.Vec3(cam.mount_forward_offset, 0.0, cam.mount_height_offset)
 
         local_transform.r = gymapi.Quat.from_axis_angle(gymapi.Vec3(0, 1, 0), np.deg2rad(cam.camera_pitch_deg))
 
@@ -110,6 +112,16 @@ class GO2Stairs(LeggedRobot):
             self.gym.attach_camera_to_body(camera_handle, self.envs[i], base_body_handle,
                                             local_transform, gymapi.FOLLOW_TRANSFORM)
             self.camera_handles.append(camera_handle)
+
+        def rotate(v):
+            r = local_transform.r.rotate(gymapi.Vec3(*v))
+            return torch.tensor([r.x, r.y, r.z], device=self.device, dtype=torch.float)
+        self.cam_local_pos = torch.tensor(
+            [local_transform.p.x, local_transform.p.y, local_transform.p.z],
+            device=self.device, dtype=torch.float)
+        self.cam_local_fwd = rotate((1.0, 0.0, 0.0))
+        self.cam_local_right = rotate((0.0, -1.0, 0.0))
+        self.cam_local_up = rotate((0.0, 0.0, 1.0))
 
     def render(self, sync_frame_time=True):
         super().render(sync_frame_time=sync_frame_time)
@@ -133,8 +145,6 @@ class GO2Stairs(LeggedRobot):
         depth = gymtorch.wrap_tensor(
             self.gym.get_camera_image_gpu_tensor(self.sim, self.envs[0], self.camera_handles[0], gymapi.IMAGE_DEPTH))
         cam = self.cfg.depth_camera
-        # IMAGE_DEPTH gives negative distance-to-pixel in meters; flip to positive
-        # and normalize [min_range, max_range] -> [0, 255] for display.
         d = torch.clamp(depth, min=-cam.max_range, max=-cam.min_range)
         d = -d
         noise = torch.randn_like(d) * (cam.noise_relative_std * d)
@@ -175,52 +185,95 @@ class GO2Stairs(LeggedRobot):
         return torch.square(base_height - self.cfg.rewards.base_height_target) * (num_contact > 0)
 
     def _draw_debug_vis(self):
-        if not self.terrain.cfg.measure_heights:
-            return
         self.gym.clear_lines(self.viewer)
         self.gym.refresh_rigid_body_state_tensor(self.sim)
 
-        normal_geom = gymutil.WireframeSphereGeometry(0.02, 4, 4, None, color=(1, 1, 0))
-        edge_geom = gymutil.WireframeSphereGeometry(0.03, 4, 4, None, color=(1, 0, 0))
-        foot_ok_geom = gymutil.WireframeSphereGeometry(0.03, 6, 6, None, color=(0, 1, 0))
-        foot_edge_geom = gymutil.WireframeSphereGeometry(0.045, 6, 6, None, color=(1, 0.3, 0))
+        if self.terrain.cfg.measure_heights:
+            normal_geom = gymutil.WireframeSphereGeometry(0.02, 4, 4, None, color=(1, 1, 0))
+            edge_geom = gymutil.WireframeSphereGeometry(0.03, 4, 4, None, color=(1, 0, 0))
+            foot_ok_geom = gymutil.WireframeSphereGeometry(0.03, 6, 6, None, color=(0, 1, 0))
+            foot_edge_geom = gymutil.WireframeSphereGeometry(0.045, 6, 6, None, color=(1, 0.3, 0))
 
-        world_points = quat_apply(self.base_quat.repeat(1, self.num_height_points), self.height_points) \
-                       + (self.root_states[:, :3]).unsqueeze(1)
-        point_is_edge = self._lookup_edge_mask(world_points[..., :2])
+            world_points = quat_apply(self.base_quat.repeat(1, self.num_height_points), self.height_points) \
+                           + (self.root_states[:, :3]).unsqueeze(1)
+            point_is_edge = self._lookup_edge_mask(world_points[..., :2])
 
-        foot_xy = self.rigid_body_state[:, self.feet_indices, :2]
-        foot_z = self.rigid_body_state[:, self.feet_indices, 2]
-        foot_is_edge = self._lookup_edge_mask(foot_xy)
-        contact = self.contact_forces[:, self.feet_indices, 2] > 1.
-        foot_penalized = (contact & foot_is_edge) if foot_is_edge is not None else torch.zeros_like(contact)
+            foot_xy = self.rigid_body_state[:, self.feet_indices, :2]
+            foot_z = self.rigid_body_state[:, self.feet_indices, 2]
+            foot_is_edge = self._lookup_edge_mask(foot_xy)
+            contact = self.contact_forces[:, self.feet_indices, 2] > 1.
+            foot_penalized = (contact & foot_is_edge) if foot_is_edge is not None else torch.zeros_like(contact)
 
-        world_points_np = world_points.cpu().numpy()
-        point_is_edge_np = point_is_edge.cpu().numpy() if point_is_edge is not None else None
-        foot_xy_np = foot_xy.cpu().numpy()
-        foot_z_np = foot_z.cpu().numpy()
-        foot_penalized_np = foot_penalized.cpu().numpy()
-        measured_heights_np = self.measured_heights.cpu().numpy()
+            world_points_np = world_points.cpu().numpy()
+            point_is_edge_np = point_is_edge.cpu().numpy() if point_is_edge is not None else None
+            foot_xy_np = foot_xy.cpu().numpy()
+            foot_z_np = foot_z.cpu().numpy()
+            foot_penalized_np = foot_penalized.cpu().numpy()
+            measured_heights_np = self.measured_heights.cpu().numpy()
 
+            for i in range(self.num_envs):
+                for j in range(self.num_height_points):
+                    x, y = world_points_np[i, j, 0], world_points_np[i, j, 1]
+                    z = measured_heights_np[i, j]
+                    geom = edge_geom if (point_is_edge_np is not None and point_is_edge_np[i, j]) else normal_geom
+                    sphere_pose = gymapi.Transform(gymapi.Vec3(x, y, z), r=None)
+                    gymutil.draw_lines(geom, self.gym, self.viewer, self.envs[i], sphere_pose)
+
+                for k in range(len(self.feet_indices)):
+                    x, y = foot_xy_np[i, k]
+                    z = foot_z_np[i, k]
+                    geom = foot_edge_geom if foot_penalized_np[i, k] else foot_ok_geom
+                    sphere_pose = gymapi.Transform(gymapi.Vec3(x, y, z), r=None)
+                    gymutil.draw_lines(geom, self.gym, self.viewer, self.envs[i], sphere_pose)
+
+        if self.cfg.depth_camera.use_camera and self.camera_handles:
+            self._draw_camera_frustum_vis()
+
+    def _draw_camera_frustum_vis(self):
+        cam = self.cfg.depth_camera
+        dist = 0.1
+        half_hfov = np.deg2rad(cam.horizontal_fov) / 2
+        aspect = self.camera_image_height / self.camera_image_width
+        half_w = dist * np.tan(half_hfov)
+        half_h = half_w * aspect
+
+        fwd = quat_apply(self.base_quat, self.cam_local_fwd.expand(self.num_envs, -1))
+        right = quat_apply(self.base_quat, self.cam_local_right.expand(self.num_envs, -1))
+        up = quat_apply(self.base_quat, self.cam_local_up.expand(self.num_envs, -1))
+        apex = quat_apply(self.base_quat, self.cam_local_pos.expand(self.num_envs, -1)) \
+               + self.root_states[:, :3]
+        center = apex + fwd * dist
+
+        corners = [
+            center + right * half_w + up * half_h,
+            center - right * half_w + up * half_h,
+            center - right * half_w - up * half_h,
+            center + right * half_w - up * half_h,
+        ]
+
+        color = np.array([0.2, 0.6, 1.0], dtype=np.float32)
         for i in range(self.num_envs):
-            for j in range(self.num_height_points):
-                x, y = world_points_np[i, j, 0], world_points_np[i, j, 1]
-                z = measured_heights_np[i, j]
-                geom = edge_geom if (point_is_edge_np is not None and point_is_edge_np[i, j]) else normal_geom
-                sphere_pose = gymapi.Transform(gymapi.Vec3(x, y, z), r=None)
-                gymutil.draw_lines(geom, self.gym, self.viewer, self.envs[i], sphere_pose)
-
-            for k in range(len(self.feet_indices)):
-                x, y = foot_xy_np[i, k]
-                z = foot_z_np[i, k]
-                geom = foot_edge_geom if foot_penalized_np[i, k] else foot_ok_geom
-                sphere_pose = gymapi.Transform(gymapi.Vec3(x, y, z), r=None)
-                gymutil.draw_lines(geom, self.gym, self.viewer, self.envs[i], sphere_pose)
+            verts = []
+            for c in corners:
+                verts.append(apex[i])
+                verts.append(c[i])
+            for k in range(4):
+                verts.append(corners[k][i])
+                verts.append(corners[(k + 1) % 4][i])
+            verts_np = torch.stack(verts).cpu().numpy().astype(np.float32).reshape(-1)
+            num_lines = len(verts) // 2
+            colors_np = np.tile(color, num_lines)
+            self.gym.add_lines(self.viewer, self.envs[i], num_lines, verts_np, colors_np)
 
     def _reward_feet_slip(self):
         contact = self.contact_forces[:, self.feet_indices, 2] > 1.
         foot_xy_vel = torch.norm(self.rigid_body_state[:, self.feet_indices, 7:9], dim=2)
         return torch.sum(contact * torch.square(foot_xy_vel), dim=1)
+
+    def _reward_hip_default_pose(self):
+        hip_pos = self.dof_pos[:, self.hip_dof_indices]
+        hip_default = self.default_dof_pos[:, self.hip_dof_indices]
+        return -torch.sum(torch.square(hip_pos - hip_default), dim=1)
 
     def _log_training_diagnostics(self):
         vx = self.commands[:, 0]
