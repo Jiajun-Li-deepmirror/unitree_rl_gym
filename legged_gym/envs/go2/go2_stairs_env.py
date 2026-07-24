@@ -347,6 +347,33 @@ class GO2Stairs(LeggedRobot):
 
         return heights.view(self.num_envs, -1) * self.terrain.cfg.vertical_scale
 
+    def _update_terrain_curriculum(self, env_ids):
+        if not self.init_done:
+            return
+        displacement = self.root_states[env_ids, :2] - self.env_origins[env_ids, :2]
+        heading_target = self.commands[env_ids, 3]
+        forward_dir = torch.stack([torch.cos(heading_target), torch.sin(heading_target)], dim=1)
+        forward_distance = torch.abs(torch.sum(displacement * forward_dir, dim=1))
+
+        commanded_speed = torch.abs(self.commands[env_ids, 0])
+        max_possible_distance = commanded_speed * self.max_episode_length_s
+        up_threshold = torch.clamp(0.7 * max_possible_distance, max=self.terrain.env_length / 2)
+        down_threshold = 0.5 * max_possible_distance
+
+        move_up = forward_distance > up_threshold
+        move_down = (forward_distance < down_threshold) & ~move_up
+
+        standing_still = commanded_speed < 1e-3
+        move_up &= ~standing_still
+        move_down &= ~standing_still
+
+        self.terrain_levels[env_ids] += 1 * move_up - 1 * move_down
+        self.terrain_levels[env_ids] = torch.where(
+            self.terrain_levels[env_ids] >= self.max_terrain_level,
+            torch.randint_like(self.terrain_levels[env_ids], self.max_terrain_level),
+            torch.clip(self.terrain_levels[env_ids], 0))
+        self.env_origins[env_ids] = self.terrain_origins[self.terrain_levels[env_ids], self.terrain_types[env_ids]]
+
     def update_command_curriculum(self, env_ids):
         if torch.mean(self.episode_sums["tracking_lin_vel"][env_ids]) / self.max_episode_length > 0.8 * self.reward_scales["tracking_lin_vel"]:
             self.command_ranges["lin_vel_x"][0] = 0.
