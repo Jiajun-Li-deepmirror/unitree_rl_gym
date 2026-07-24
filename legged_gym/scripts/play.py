@@ -35,8 +35,33 @@ import isaacgym
 from legged_gym.envs import *
 from legged_gym.utils import  get_args, export_policy_as_jit, task_registry, Logger
 
+from isaacgym import gymapi
+from isaacgym.torch_utils import quat_apply
+
 import numpy as np
 import torch
+
+FOLLOW_CHASE_DISTANCE = 1.5  # m, behind the followed robot
+FOLLOW_CHASE_HEIGHT = 0.6    # m, above the followed robot
+
+
+def update_follow_camera(env, follow_index):
+    """Keep the viewer camera behind and above env `follow_index`, tracking
+    its current position and heading every frame."""
+    base_pos = env.root_states[follow_index, :3].cpu().numpy()
+    forward = quat_apply(env.base_quat[follow_index:follow_index + 1],
+                         env.forward_vec[follow_index:follow_index + 1])[0].cpu().numpy()
+    cam_pos = base_pos - forward * FOLLOW_CHASE_DISTANCE + np.array([0.0, 0.0, FOLLOW_CHASE_HEIGHT])
+    cam_target = base_pos + np.array([0.0, 0.0, 0.2])
+    env.set_camera(cam_pos, cam_target)
+
+
+def print_follow_command(env, follow_index):
+    cmd = env.commands[follow_index]
+    msg = f"[robot {follow_index}] command: lin_vel_x={cmd[0].item():.2f} lin_vel_y={cmd[1].item():.2f} ang_vel_yaw={cmd[2].item():.2f}"
+    if env.cfg.commands.heading_command:
+        msg += f" heading={cmd[3].item():.2f}"
+    print(msg)
 
 
 def play(args):
@@ -74,6 +99,17 @@ def play(args):
     camera_direction = np.array(env_cfg.viewer.lookat) - np.array(env_cfg.viewer.pos)
     img_idx = 0
 
+    follow_index = 0
+    last_printed_command = None
+    if FOLLOW_ROBOT:
+        if env.viewer is None:
+            raise RuntimeError("FOLLOW_ROBOT needs a viewer -- don't pass --headless")
+        env.gym.subscribe_viewer_keyboard_event(env.viewer, gymapi.KEY_LEFT_BRACKET, "follow_prev")
+        env.gym.subscribe_viewer_keyboard_event(env.viewer, gymapi.KEY_RIGHT_BRACKET, "follow_next")
+        print(f"Following robot 0/{env.num_envs - 1}. Press [ / ] to switch.")
+        print_follow_command(env, follow_index)
+        last_printed_command = env.commands[follow_index].clone()
+
     for i in range(10*int(env.max_episode_length)):
         actions = policy(obs.detach())
         obs, _, rews, dones, infos = env.step(actions.detach())
@@ -81,10 +117,27 @@ def play(args):
             if i % 2:
                 filename = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name, 'exported', 'frames', f"{img_idx}.png")
                 env.gym.write_viewer_image_to_file(env.viewer, filename)
-                img_idx += 1 
+                img_idx += 1
         if MOVE_CAMERA:
             camera_position += camera_vel * env.dt
             env.set_camera(camera_position, camera_position + camera_direction)
+        if FOLLOW_ROBOT:
+            switched = False
+            for evt in env.gym.query_viewer_action_events(env.viewer):
+                if evt.value == 0:
+                    continue
+                if evt.action == "follow_prev":
+                    follow_index = (follow_index - 1) % env.num_envs
+                    switched = True
+                elif evt.action == "follow_next":
+                    follow_index = (follow_index + 1) % env.num_envs
+                    switched = True
+            current_command = env.commands[follow_index]
+            watch_idx = [0, 1, 3] if env.cfg.commands.heading_command else [0, 1, 2]
+            if switched or not torch.equal(current_command[watch_idx], last_printed_command[watch_idx]):
+                print_follow_command(env, follow_index)
+                last_printed_command = current_command.clone()
+            update_follow_camera(env, follow_index)
 
         if i < stop_state_log:
             logger.log_states(
@@ -117,5 +170,6 @@ if __name__ == '__main__':
     EXPORT_POLICY = True
     RECORD_FRAMES = False
     MOVE_CAMERA = False
+    FOLLOW_ROBOT = False  # camera chases one robot; [ / ] cycle which one, prints its command
     args = get_args()
     play(args)
