@@ -27,8 +27,9 @@ class GO2StairsCfg( GO2RoughCfg ):
             feet_stumble = -1.0
             feet_edge = -0.25
             no_fly = 0.1
+            gait_trot = 0.15
             base_height = -4.0
-            hip_default_pose = -0.2
+            hip_default_pose = -0.4
             orientation = -2.0
 
     class height_scan:

@@ -160,6 +160,12 @@ class GO2Stairs(LeggedRobot):
         num_contact = torch.sum(contact.float(), dim=1)
         return (num_contact >= 2).float()
 
+    def _reward_gait_trot(self):
+        contact = self.contact_forces[:, self.feet_indices, 2] > 1.
+        fl, fr, rl, rr = contact[:, 0], contact[:, 1], contact[:, 2], contact[:, 3]
+        diagonal_pattern = (fl == rr) & (fr == rl) & (fl != fr)
+        return diagonal_pattern.float()
+
     def _reward_feet_edge(self):
         feet_at_edge = self._lookup_edge_mask(self.rigid_body_state[:, self.feet_indices, :2])
         if feet_at_edge is None:
