@@ -22,12 +22,14 @@ class GO2StairsCfg( GO2RoughCfg ):
     class rewards( GO2RoughCfg.rewards ):
         edge_height_threshold_m = 0.03
         class scales( GO2RoughCfg.rewards.scales ):
-            # feet_contact_forces = -0.01
-            # feet_slip = -0.04
-            no_fly = 0.1
+            feet_contact_forces = -0.01
+            feet_slip = -0.04
+            feet_stumble = -1.0
             feet_edge = -0.25
-            # base_height = -1.0
-            hip_default_pose = -0.05
+            no_fly = 0.1
+            base_height = -4.0
+            hip_default_pose = -0.2
+            orientation = -2.0
 
     class height_scan:
         near_edge_x = 0.2            
@@ -48,7 +50,7 @@ class GO2StairsCfg( GO2RoughCfg ):
         use_camera = False
         native_image_width = 544
         native_image_height = 640
-        resolution_scale = 0.25
+        resolution_scale = 0.5
         fps = 15
 
         noise_relative_std = 0.02
@@ -60,6 +62,7 @@ class GO2StairsCfgPPO( GO2RoughCfgPPO ):
         latent_dim = 32
 
     class runner( GO2RoughCfgPPO.runner ):
+        # policy_class_name = 'ActorCritic'
         policy_class_name = 'ActorCriticHeightEncoder'
         run_name = ''
         experiment_name = 'stairs_go2'

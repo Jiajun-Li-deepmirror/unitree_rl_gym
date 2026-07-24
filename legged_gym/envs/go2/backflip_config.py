@@ -39,7 +39,7 @@ class BackflipCfg( GO2RoughCfg ):
             flip_balance = 1.0
             stand_orientation = 1.0
             lin_vel_penalty = 0.5
-            style = -0.05
+            style = 0.05
 
 class BackflipCfgPPO( GO2RoughCfgPPO ):
     class runner( GO2RoughCfgPPO.runner ):

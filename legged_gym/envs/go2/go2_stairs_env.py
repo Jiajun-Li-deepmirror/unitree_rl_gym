@@ -129,12 +129,6 @@ class GO2Stairs(LeggedRobot):
             self._show_depth_camera_view()
 
     def _show_depth_camera_view(self):
-        """Render camera sensors and pop up env 0's depth image in a cv2 window.
-        Only runs with a viewer (not headless): in headless mode base_task.py
-        sets graphics_device_id=-1 (no graphics context at all), so camera
-        sensors can't render there -- wiring depth into actual headless student
-        training will need that addressed first. This is prep/visualization
-        only, matching "don't add it to training yet"."""
         try:
             import cv2
         except ImportError:
@@ -273,7 +267,13 @@ class GO2Stairs(LeggedRobot):
     def _reward_hip_default_pose(self):
         hip_pos = self.dof_pos[:, self.hip_dof_indices]
         hip_default = self.default_dof_pos[:, self.hip_dof_indices]
-        return -torch.sum(torch.square(hip_pos - hip_default), dim=1)
+        return torch.sum(torch.square(hip_pos - hip_default), dim=1)
+
+    def _reward_feet_stumble(self):
+        # Penalize feet hitting vertical surfaces
+        rew = torch.any(torch.norm(self.contact_forces[:, self.feet_indices, :2], dim=2) >\
+             4 *torch.abs(self.contact_forces[:, self.feet_indices, 2]), dim=1)
+        return rew.float()
 
     def _log_training_diagnostics(self):
         vx = self.commands[:, 0]
