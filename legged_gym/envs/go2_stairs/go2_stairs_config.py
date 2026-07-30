@@ -32,6 +32,18 @@ class GO2StairsCfg( LeggedRobotCfg ):
         # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete]
         terrain_proportions = [0.0, 0.0, 0.5, 0.5, 0.0]
 
+    class commands( LeggedRobotCfg.commands ):
+        curriculum = False
+        max_curriculum = 1.
+        num_commands = 4
+        resampling_time = 10. # time before commands are changed [s]
+        heading_command = False
+        class ranges:
+            lin_vel_x = [0.0, 1.2]   # min max [m/s], slower than flat ground for stair climbing
+            lin_vel_y = [0.0, 0.0]   # min max [m/s]
+            ang_vel_yaw = [-0.75, 0.75] # min max [rad/s]
+            heading = [-3.14, 3.14]
+
     class height_encoder:
         # MLP that encodes the raw height-scan points into a latent appended to the observation
         hidden_dims = [128, 64]
