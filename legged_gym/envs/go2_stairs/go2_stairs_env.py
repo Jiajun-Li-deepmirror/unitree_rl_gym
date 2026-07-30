@@ -1,6 +1,5 @@
 import numpy as np
 import torch
-import torch.nn as nn
 
 from isaacgym import gymapi, gymtorch
 from isaacgym.torch_utils import torch_rand_float
@@ -11,9 +10,10 @@ from legged_gym.utils.math import quat_apply_yaw
 
 
 class GO2Stairs(LeggedRobot):
-    """ GO2 trained on stairs terrain. Adds trimesh terrain generation and height-scan
-        sensing on top of the base LeggedRobot, and encodes the height scan to a small
-        latent vector (via an MLP) before it is appended to the proprioceptive observation.
+    """ GO2 trained on stairs terrain. Adds trimesh terrain generation and height-scan sensing
+        on top of the base LeggedRobot. The raw height scan is appended to the proprioceptive
+        observation as-is; it's encoded into a latent by ActorCriticHeightEncoder (trained
+        end-to-end with the policy), not by the env - see legged_gym/algorithms/.
     """
 
     def create_sim(self):
@@ -92,15 +92,6 @@ class GO2Stairs(LeggedRobot):
         heights = torch.min(heights, self.height_samples[px, py + 1])
         return heights.view(self.num_envs, -1) * self.terrain.cfg.vertical_scale
 
-    def _build_height_encoder(self):
-        cfg = self.cfg.height_encoder
-        dims = [self.num_height_points] + list(cfg.hidden_dims)
-        layers = []
-        for i in range(len(dims) - 1):
-            layers += [nn.Linear(dims[i], dims[i + 1]), nn.ELU()]
-        layers.append(nn.Linear(dims[-1], cfg.latent_dim))
-        return nn.Sequential(*layers).to(self.device)
-
     def _init_feet_state(self):
         rigid_body_state = self.gym.acquire_rigid_body_state_tensor(self.sim)
         self.rigid_body_states = gymtorch.wrap_tensor(rigid_body_state)
@@ -121,7 +112,6 @@ class GO2Stairs(LeggedRobot):
         if self.cfg.terrain.measure_heights:
             self.height_points = self._init_height_points()
             self.measured_heights = torch.zeros(self.num_envs, self.num_height_points, device=self.device, requires_grad=False)
-            self.height_encoder = self._build_height_encoder()
 
     def _post_physics_step_callback(self):
         self._update_gait_phase()
@@ -161,6 +151,9 @@ class GO2Stairs(LeggedRobot):
         self.gait_enabled = torch.any(self.commands[:, :3] != 0., dim=1)
 
     def compute_observations(self):
+        # Raw height scan (not an encoded latent): the encoder is a trainable submodule of
+        # ActorCriticHeightEncoder now, so it needs to see the actual scan to be able to learn
+        # anything from it - see legged_gym/algorithms/height_actor_critic.py.
         height_scan = torch.clip(
             self.root_states[:, 2].unsqueeze(1) - self.cfg.rewards.base_height_target - self.measured_heights,
             -1, 1.,
@@ -169,8 +162,6 @@ class GO2Stairs(LeggedRobot):
             noise_scale = (self.cfg.noise.noise_scales.height_measurements
                            * self.cfg.noise.noise_level * self.obs_scales.height_measurements)
             height_scan += (2 * torch.rand_like(height_scan) - 1) * noise_scale
-        with torch.no_grad():
-            height_latent = self.height_encoder(height_scan)
 
         self.obs_buf = torch.cat((
             self.base_lin_vel * self.obs_scales.lin_vel,
@@ -180,9 +171,9 @@ class GO2Stairs(LeggedRobot):
             (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos,
             self.dof_vel * self.obs_scales.dof_vel,
             self.actions,
-            height_latent,
+            height_scan,
         ), dim=-1)
-        # add noise if needed (noise_scale_vec is zero-padded over the height-latent tail,
+        # add noise if needed (noise_scale_vec is zero-padded over the height-scan tail,
         # since noise there is already injected into the raw height scan above)
         if self.add_noise:
             self.obs_buf += (2 * torch.rand_like(self.obs_buf) - 1) * self.noise_scale_vec

@@ -1,10 +1,16 @@
 from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobotCfgPPO
 
-HEIGHT_LATENT_DIM = 32  # dim of the MLP-encoded height-scan latent appended to the observation
+HEIGHT_LATENT_DIM = 32  # dim of the height-scan encoder's output latent (see height_encoder below)
+# proprio (48, same layout as go2) + raw height-scan points. The height-scan encoder MLP now lives
+# inside ActorCriticHeightEncoder (see legged_gym/algorithms/height_actor_critic.py) so it's trained
+# end-to-end by PPO, instead of being a fixed/untrained encoder baked into the env observation - so
+# the env has to expose the *raw* height scan here, not an already-encoded latent.
+NUM_HEIGHT_POINTS = len(LeggedRobotCfg.terrain.measured_points_x) * len(LeggedRobotCfg.terrain.measured_points_y)
 
 class GO2StairsCfg( LeggedRobotCfg ):
     class env( LeggedRobotCfg.env ):
-        num_observations = 48 + HEIGHT_LATENT_DIM  # proprio (48, same layout as go2) + height-scan latent
+        num_envs = 4096
+        num_observations = 48 + NUM_HEIGHT_POINTS  # proprio (48) + raw height-scan points
 
     class init_state( LeggedRobotCfg.init_state ):
         pos = [0.0, 0.0, 0.42] # x,y,z [m]
@@ -100,8 +106,12 @@ class GO2StairsCfg( LeggedRobotCfg ):
             hip_pos = -0.0
 
 class GO2StairsCfgPPO( LeggedRobotCfgPPO ):
+    # trains the height-scan encoder jointly with the policy (see legged_gym/algorithms/)
+    runner_class_name = 'HeightEncoderOnPolicyRunner'
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         entropy_coef = 0.01
     class runner( LeggedRobotCfgPPO.runner ):
+        policy_class_name = 'ActorCriticHeightEncoder'
         run_name = ''
         experiment_name = 'stairs_go2'
+        max_iterations = 1500
