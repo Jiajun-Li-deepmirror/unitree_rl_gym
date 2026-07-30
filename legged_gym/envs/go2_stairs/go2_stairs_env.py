@@ -1,7 +1,11 @@
+import math
+import sys
+import types
+
 import numpy as np
 import torch
 
-from isaacgym import gymapi, gymtorch
+from isaacgym import gymapi, gymtorch, gymutil, terrain_utils
 from isaacgym.torch_utils import torch_rand_float
 
 from legged_gym.envs.base.legged_robot import LeggedRobot
@@ -19,16 +23,100 @@ class GO2Stairs(LeggedRobot):
     def create_sim(self):
         self.up_axis_idx = 2
         self.sim = self.gym.create_sim(self.sim_device_id, self.graphics_device_id, self.physics_engine, self.sim_params)
-        mesh_type = self.cfg.terrain.mesh_type
-        if mesh_type in ['heightfield', 'trimesh']:
-            self.terrain = Terrain(self.cfg.terrain, self.num_envs)
-        if mesh_type == 'plane':
-            self._create_ground_plane()
-        elif mesh_type == 'trimesh':
+        if self.cfg.terrain.u_shape_playground:
+            self.terrain = self._build_u_shape_terrain()
             self._create_trimesh()
         else:
-            raise ValueError(f"go2_stairs only supports terrain.mesh_type in ['plane', 'trimesh'], got '{mesh_type}'")
+            mesh_type = self.cfg.terrain.mesh_type
+            if mesh_type in ['heightfield', 'trimesh']:
+                self.terrain = Terrain(self.cfg.terrain, self.num_envs)
+            if mesh_type == 'plane':
+                self._create_ground_plane()
+            elif mesh_type == 'trimesh':
+                self._create_trimesh()
+            else:
+                raise ValueError(f"go2_stairs only supports terrain.mesh_type in ['plane', 'trimesh'], got '{mesh_type}'")
         self._create_envs()
+        self._init_camera()
+
+    def _build_u_shape_terrain(self):
+        """ A single continuously-ascending U-shaped (switchback) staircase: flight 1 climbs
+            in +x, a landing turns the walking direction around, flight 2 climbs further
+            going back in -x, one flight-width over in y. Bypasses the curriculum Terrain
+            grid entirely - meant for a single robot (play_keyboard.py showcase run).
+        """
+        cfg = self.cfg.terrain
+        u_cfg = cfg.u_shape
+        horizontal_scale = cfg.horizontal_scale
+        vertical_scale = cfg.vertical_scale
+        border_px = round(cfg.border_size / horizontal_scale)
+
+        step_width_px = max(round(u_cfg.step_width / horizontal_scale), 1)
+        step_height_px = max(round(u_cfg.step_height / vertical_scale), 1)
+        flight_width_px = max(round(u_cfg.flight_width / horizontal_scale), 1)
+        platform_px = max(round(u_cfg.platform_size / horizontal_scale), 1)
+        top_platform_px = max(round(u_cfg.top_platform_size / horizontal_scale), 1)
+        # flight 1 and flight 2 share this x-range (mirrored, offset in y); the run-up before
+        # flight 1 has to be at least as wide as the top platform carved out of it below flight 2
+        run_up_px = max(platform_px, top_platform_px)
+
+        x_extent = run_up_px + u_cfg.num_steps * step_width_px + platform_px
+        y_extent = 2 * flight_width_px
+        tot_rows = x_extent + 2 * border_px
+        tot_cols = y_extent + 2 * border_px
+
+        height_field_raw = np.zeros((tot_rows, tot_cols), dtype=np.int16)
+
+        y0 = border_px
+        y1 = y0 + flight_width_px
+
+        # flight 1: climbs in +x, starting after the flat run-up (spawn area)
+        x = border_px + run_up_px
+        height = 0
+        for _ in range(u_cfg.num_steps):
+            x_end = x + step_width_px
+            height += step_height_px
+            height_field_raw[x:x_end, y0:y0 + flight_width_px] = height
+            x = x_end
+
+        # landing: flat turn at the top of flight 1, spans both flights
+        landing_start = x
+        height_field_raw[landing_start:landing_start + platform_px, y0:y0 + y_extent] = height
+
+        # flight 2: continues climbing, going back in -x, one flight-width over in y - starts
+        # flush against the landing's near edge (NOT its far edge) so it doesn't climb back
+        # into and overwrite part of the landing; ends back at flight 1's own start x
+        x = landing_start
+        for _ in range(u_cfg.num_steps):
+            x_start = x - step_width_px
+            height += step_height_px
+            height_field_raw[x_start:x, y1:y1 + flight_width_px] = height
+            x = x_start
+
+        # top platform: flat landing at the final height, carved out of the run_up_px region
+        # (same x-range as the bottom spawn area, but on flight 2's y-strip)
+        height_field_raw[x - top_platform_px:x, y1:y1 + flight_width_px] = height
+
+        vertices, triangles = terrain_utils.convert_heightfield_to_trimesh(
+            height_field_raw, horizontal_scale, vertical_scale, cfg.slope_treshold)
+
+        terrain = types.SimpleNamespace()
+        terrain.cfg = cfg
+        terrain.height_field_raw = height_field_raw
+        terrain.heightsamples = height_field_raw
+        terrain.tot_rows, terrain.tot_cols = tot_rows, tot_cols
+        terrain.vertices, terrain.triangles = vertices, triangles
+        # spawn just in front of flight 1's first step (facing the stairs), not centered on
+        # the run-up platform. NOTE: env_origins is a *world* position, added directly to
+        # root_states - and the mesh itself is placed at world = pixel*horizontal_scale -
+        # border_size (see _create_trimesh), which exactly cancels the border_px pixel
+        # padding baked into every x/y index here. So this must NOT add border_px/y0 back in,
+        # or the spawn point ends up shifted by a full border_size (default 25m) off the mesh.
+        spawn_margin_px = min(max(round(0.3 / horizontal_scale), 1), run_up_px)
+        spawn_x = (run_up_px - spawn_margin_px) * horizontal_scale
+        spawn_y = (flight_width_px / 2) * horizontal_scale
+        terrain.env_origins = np.array([[[spawn_x, spawn_y, 0.0]]])  # (num_rows=1, num_cols=1, 3)
+        return terrain
 
     def _create_trimesh(self):
         tm_params = gymapi.TriangleMeshParams()
@@ -56,7 +144,28 @@ class GO2Stairs(LeggedRobot):
         edge = (dx > threshold) | (dy > threshold)
         self.x_edge_mask = torch.tensor(edge, device=self.device, dtype=torch.bool)
 
+    def _reset_root_states(self, env_ids):
+        if not self.cfg.terrain.u_shape_playground:
+            return super()._reset_root_states(env_ids)
+        # same as the base class, but skips its +-1m random xy jitter: on this compact
+        # showcase platform that jitter can dump the robot onto the first step or past the
+        # platform edge, defeating the point of a fixed, deliberately placed spawn point
+        self.root_states[env_ids] = self.base_init_state
+        self.root_states[env_ids, :3] += self.env_origins[env_ids]
+        self.root_states[env_ids, 7:13] = torch_rand_float(-0.5, 0.5, (len(env_ids), 6), device=self.device)
+        env_ids_int32 = env_ids.to(dtype=torch.int32)
+        self.gym.set_actor_root_state_tensor_indexed(
+            self.sim, gymtorch.unwrap_tensor(self.root_states),
+            gymtorch.unwrap_tensor(env_ids_int32), len(env_ids_int32))
+
     def _get_env_origins(self):
+        if self.cfg.terrain.u_shape_playground:
+            self.custom_origins = True
+            origin = torch.tensor(self.terrain.env_origins[0, 0], device=self.device, dtype=torch.float)
+            self.env_origins = origin.unsqueeze(0).repeat(self.num_envs, 1)
+            # no real curriculum on this terrain; _reward_feet_edge just gates on level > 3
+            self.terrain_levels = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+            return
         if self.cfg.terrain.mesh_type not in ['heightfield', 'trimesh']:
             return super()._get_env_origins()
         self.custom_origins = True
@@ -81,9 +190,9 @@ class GO2Stairs(LeggedRobot):
         return points
 
     def _get_heights(self):
-        points = quat_apply_yaw(self.base_quat.repeat(1, self.num_height_points), self.height_points) \
+        world_points = quat_apply_yaw(self.base_quat.repeat(1, self.num_height_points), self.height_points) \
             + self.root_states[:, :3].unsqueeze(1)
-        points += self.terrain.cfg.border_size
+        points = world_points + self.terrain.cfg.border_size
         points = (points / self.terrain.cfg.horizontal_scale).long()
         px = torch.clip(points[:, :, 0].view(-1), 0, self.height_samples.shape[0] - 2)
         py = torch.clip(points[:, :, 1].view(-1), 0, self.height_samples.shape[1] - 2)
@@ -91,6 +200,103 @@ class GO2Stairs(LeggedRobot):
         heights = torch.min(self.height_samples[px, py], self.height_samples[px + 1, py])
         heights = torch.min(heights, self.height_samples[px, py + 1])
         return heights.view(self.num_envs, -1) * self.terrain.cfg.vertical_scale
+
+    def _draw_debug_vis(self):
+        """ Draws a small sphere at every height-scan sample point: red if that point falls
+            on a stair-edge cell (self.x_edge_mask, same mask _reward_feet_edge uses), green
+            otherwise. Recomputed fresh from the CURRENT root/base state every call (rather
+            than reusing values cached during this step's _get_heights()) so it can't ever
+            draw one step's spheres against a different step's (post-reset) robot pose -
+            that mismatch is what caused the visible flicker/jumping.
+        """
+        self.gym.clear_lines(self.viewer)
+
+        world_points = quat_apply_yaw(self.base_quat.repeat(1, self.num_height_points), self.height_points) \
+            + self.root_states[:, :3].unsqueeze(1)
+        idx_points = world_points + self.terrain.cfg.border_size
+        idx_points = (idx_points / self.terrain.cfg.horizontal_scale).long()
+        px = torch.clip(idx_points[:, :, 0].view(-1), 0, self.height_samples.shape[0] - 2)
+        py = torch.clip(idx_points[:, :, 1].view(-1), 0, self.height_samples.shape[1] - 2)
+
+        heights = torch.min(self.height_samples[px, py], self.height_samples[px + 1, py])
+        heights = torch.min(heights, self.height_samples[px, py + 1])
+        heights = (heights.view(self.num_envs, -1) * self.terrain.cfg.vertical_scale).cpu().numpy()
+        is_edge = self.x_edge_mask[px, py].view(self.num_envs, -1).cpu().numpy()
+        world_xy = world_points[:, :, :2].cpu().numpy()
+
+        green = gymutil.WireframeSphereGeometry(0.02, 4, 4, None, color=(0, 1, 0))
+        red = gymutil.WireframeSphereGeometry(0.03, 4, 4, None, color=(1, 0, 0))
+        for i in range(self.num_envs):
+            for j in range(self.num_height_points):
+                pose = gymapi.Transform(gymapi.Vec3(float(world_xy[i, j, 0]), float(world_xy[i, j, 1]), float(heights[i, j])))
+                geom = red if is_edge[i, j] else green
+                gymutil.draw_lines(geom, self.gym, self.viewer, self.envs[i], pose)
+
+    def _draw_camera_fov(self, color=(1.0, 0.6, 0.0)):
+        """ Draws a small wireframe pyramid from the depth camera's current position out to a
+            small rectangle at cam_cfg.fov_viz_length, sized to match its actual
+            horizontal_fov/aspect ratio - a quick visual sanity check of where it's looking.
+        """
+        cam_cfg = self.cfg.camera
+        env_h = self.envs[0]
+        transform = self.gym.get_camera_transform(self.sim, env_h, self.camera_handle)
+        apex = transform.p
+        fwd = transform.r.rotate(gymapi.Vec3(1, 0, 0))
+        up = transform.r.rotate(gymapi.Vec3(0, 0, 1))
+        right = transform.r.rotate(gymapi.Vec3(0, 1, 0))
+
+        length = cam_cfg.fov_viz_length
+        hfov = math.radians(cam_cfg.horizontal_fov)
+        vfov = math.radians(cam_cfg.horizontal_fov) * cam_cfg.height / cam_cfg.width
+        half_w = length * math.tan(hfov / 2)
+        half_h = length * math.tan(vfov / 2)
+
+        def corner(sx, sy):
+            return gymapi.Vec3(
+                apex.x + fwd.x * length + right.x * sx * half_w + up.x * sy * half_h,
+                apex.y + fwd.y * length + right.y * sx * half_w + up.y * sy * half_h,
+                apex.z + fwd.z * length + right.z * sx * half_w + up.z * sy * half_h,
+            )
+
+        corners = [corner(-1, -1), corner(1, -1), corner(1, 1), corner(-1, 1)]
+        verts = []
+        for c in corners:
+            verts += [apex.x, apex.y, apex.z, c.x, c.y, c.z]
+        for i in range(4):
+            a, b = corners[i], corners[(i + 1) % 4]
+            verts += [a.x, a.y, a.z, b.x, b.y, b.z]
+        vertices = np.array(verts, dtype=np.float32)
+        colors = np.array(list(color) * 8, dtype=np.float32)
+        self.gym.add_lines(self.viewer, env_h, 8, vertices, colors)
+
+    def render(self, sync_frame_time=True):
+        """ Same as BaseTask.render(), except the height-scan/camera-FOV debug lines are
+            (re)drawn right before gym.draw_viewer() - not from post_physics_step(), a step
+            earlier - since clearing/adding them anywhere else left a window where the viewer
+            could capture a half-updated line buffer, which is what caused the flicker.
+        """
+        if not self.viewer:
+            return
+        if self.gym.query_viewer_has_closed(self.viewer):
+            sys.exit()
+        for evt in self.gym.query_viewer_action_events(self.viewer):
+            if evt.action == "QUIT" and evt.value > 0:
+                sys.exit()
+            elif evt.action == "toggle_viewer_sync" and evt.value > 0:
+                self.enable_viewer_sync = not self.enable_viewer_sync
+        if self.device != 'cpu':
+            self.gym.fetch_results(self.sim, True)
+        if self.enable_viewer_sync:
+            self.gym.step_graphics(self.sim)
+            if self.cfg.terrain.measure_heights:
+                self._draw_debug_vis()
+            if self.camera_handle is not None:
+                self._draw_camera_fov()
+            self.gym.draw_viewer(self.viewer, self.sim, True)
+            if sync_frame_time:
+                self.gym.sync_frame_time(self.sim)
+        else:
+            self.gym.poll_viewer_events(self.viewer)
 
     def _init_feet_state(self):
         rigid_body_state = self.gym.acquire_rigid_body_state_tensor(self.sim)
@@ -101,6 +307,39 @@ class GO2Stairs(LeggedRobot):
     def update_feet_state(self):
         self.gym.refresh_rigid_body_state_tensor(self.sim)
         self.feet_pos = self.rigid_body_states_view[:, self.feet_indices, :3]
+
+    def _init_camera(self):
+        """ Mounts a depth camera on env 0 only (see cfg.camera) - interactive use in
+            play_keyboard.py, never enabled during training (cfg.camera.use_camera is always
+            False unless play_keyboard.py's --use_camera flag turns it on for num_envs=1).
+        """
+        self.camera_handle = None
+        cam_cfg = self.cfg.camera
+        if not cam_cfg.use_camera:
+            return
+        camera_props = gymapi.CameraProperties()
+        camera_props.width = max(1, round(cam_cfg.width * cam_cfg.scale))
+        camera_props.height = max(1, round(cam_cfg.height * cam_cfg.scale))
+        camera_props.horizontal_fov = cam_cfg.horizontal_fov
+        camera_props.near_plane = cam_cfg.near_plane
+        camera_props.far_plane = cam_cfg.far_plane
+        self.camera_handle = self.gym.create_camera_sensor(self.envs[0], camera_props)
+        body_handle = self.gym.find_actor_rigid_body_handle(self.envs[0], self.actor_handles[0], cam_cfg.mount_body)
+        local_transform = gymapi.Transform()
+        local_transform.p = gymapi.Vec3(*cam_cfg.mount_pos)
+        # identity attach looks along the body's local +x (forward); pitching around local y
+        # tilts the view down toward the ground/stairs ahead
+        local_transform.r = gymapi.Quat.from_axis_angle(gymapi.Vec3(0, 1, 0), cam_cfg.mount_pitch)
+        self.gym.attach_camera_to_body(self.camera_handle, self.envs[0], body_handle, local_transform, gymapi.FOLLOW_TRANSFORM)
+
+    def get_camera_depth_image(self):
+        """ Renders and returns the mounted depth camera's current image as a (height, width)
+            numpy array of positive distances in meters (IMAGE_DEPTH itself returns negative
+            distances). Only valid when cfg.camera.use_camera is True.
+        """
+        self.gym.render_all_camera_sensors(self.sim)
+        depth = self.gym.get_camera_image(self.sim, self.envs[0], self.camera_handle, gymapi.IMAGE_DEPTH)
+        return -depth
 
     def _init_buffers(self):
         super()._init_buffers()

@@ -10,6 +10,7 @@ NUM_HEIGHT_POINTS = len(LeggedRobotCfg.terrain.measured_points_x) * len(LeggedRo
 class GO2StairsCfg( LeggedRobotCfg ):
     class env( LeggedRobotCfg.env ):
         num_envs = 4096
+        # num_envs = 2048
         num_observations = 48 + NUM_HEIGHT_POINTS  # proprio (48) + raw height-scan points
 
     class init_state( LeggedRobotCfg.init_state ):
@@ -38,6 +39,18 @@ class GO2StairsCfg( LeggedRobotCfg ):
         # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete]
         terrain_proportions = [0.0, 0.0, 0.5, 0.5, 0.0]
 
+        # if True, replaces the curriculum terrain grid with a single continuously-ascending
+        # U-shaped (switchback) staircase - one flight up, a landing that turns around, a
+        # second flight up. Used by play_keyboard.py for a one-robot showcase run.
+        u_shape_playground = False
+        class u_shape:
+            num_steps = 12       # steps per flight
+            step_width = 0.3     # [m] depth of each step
+            step_height = 0.12   # [m] rise of each step
+            flight_width = 1.2   # [m] width of each flight
+            platform_size = 1.0  # [m] flat spawn run-up / mid-turn landing length
+            top_platform_size = 1.5  # [m] flat landing at the top of flight 2
+
     class commands( LeggedRobotCfg.commands ):
         curriculum = False
         max_curriculum = 1.
@@ -54,6 +67,29 @@ class GO2StairsCfg( LeggedRobotCfg ):
         # MLP that encodes the raw height-scan points into a latent appended to the observation
         hidden_dims = [128, 64]
         latent_dim = HEIGHT_LATENT_DIM
+
+    class camera:
+        # Depth camera mounted on the robot's head, for a future camera-based student policy
+        # (see [[height-encoder-runner-plan]]). Only ever enabled interactively, via
+        # play_keyboard.py's --use_camera flag - never during training: num_envs there is 1,
+        # whereas rendering a depth camera for thousands of parallel training envs would be
+        # prohibitively expensive and isn't needed yet (the teacher trains on the height scan).
+        use_camera = False
+        # resolution/fps: Depth Output Resolution "Up to 544 x 640" @ "Up to 15 fps"
+        width = 544
+        height = 640
+        scale = 0.5  # uniform scale factor applied to width/height (e.g. 0.5 to halve resolution)
+        fps = 15
+        # near_plane = 0.19  # [m] Min-Z at max resolution
+        near_plane = 1e-5
+        # not in the datasheet (only "<2% accuracy @ 3m" is specced) - pick a sensible usable
+        # range and tune later against the real sensor if needed
+        far_plane = 5.0  # [m]
+        horizontal_fov = 87.0  # [deg] not in the datasheet either - typical for this class of stereo module
+        mount_body = "Head_lower"  # front/chin mount point already present on the go2 URDF
+        mount_pos = [0.0, 0.0, 0.15]  # local offset from mount_body's own origin [m]
+        mount_pitch = 0.5236  # [rad] ~30 deg downward tilt, to see the ground/stairs ahead
+        fov_viz_length = 0.3  # [m] length of the small FOV pyramid drawn in play_keyboard.py
 
     class control( LeggedRobotCfg.control ):
         # PD Drive parameters:
@@ -114,4 +150,4 @@ class GO2StairsCfgPPO( LeggedRobotCfgPPO ):
         policy_class_name = 'ActorCriticHeightEncoder'
         run_name = ''
         experiment_name = 'stairs_go2'
-        max_iterations = 1500
+        max_iterations = 3000
