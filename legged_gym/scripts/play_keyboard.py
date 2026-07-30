@@ -1,5 +1,6 @@
 import os
 import sys
+from collections import deque
 
 import isaacgym
 from isaacgym import gymapi
@@ -8,6 +9,7 @@ from legged_gym.utils import get_args, task_registry
 
 import numpy as np
 import torch
+import matplotlib.pyplot as plt
 
 # vx/vy/vyaw step applied on every key press, and the camera offset (world
 # frame, relative to the robot) used while the follow-above camera is active.
@@ -15,6 +17,11 @@ VX_STEP = 0.1
 VY_STEP = 0.1
 VYAW_STEP = 0.1
 CAMERA_OFFSET = np.array([-1.0, 0.0, 1.5])  # behind (-x) and above (+z) the robot
+
+# live vx/vyaw command-vs-actual strip chart (scrolling window, like an ECG trace)
+PLOT_WINDOW_S = 5.0
+PLOT_VX_RANGE = 1.5
+PLOT_VYAW_RANGE = 1.0
 
 KEY_ACTIONS = {
     gymapi.KEY_W: "vx_plus",
@@ -60,6 +67,34 @@ def play(args):
     commands = torch.zeros(3, dtype=torch.float, device=env.device)
     follow_camera = False
 
+    # live strip chart: vx/vyaw command vs. actual, scrolling over the last PLOT_WINDOW_S seconds
+    plot_len = max(int(PLOT_WINDOW_S / env.dt), 1)
+    t_buf = deque(maxlen=plot_len)
+    vx_cmd_buf = deque(maxlen=plot_len)
+    vx_real_buf = deque(maxlen=plot_len)
+    vyaw_cmd_buf = deque(maxlen=plot_len)
+    vyaw_real_buf = deque(maxlen=plot_len)
+
+    plt.ion()
+    fig, (ax_vx, ax_vyaw) = plt.subplots(2, 1, figsize=(6, 4.5), sharex=True)
+    line_vx_cmd, = ax_vx.plot([], [], color='tab:orange', label='vx cmd')
+    line_vx_real, = ax_vx.plot([], [], color='tab:blue', label='vx real')
+    ax_vx.set_ylim(-PLOT_VX_RANGE, PLOT_VX_RANGE)
+    ax_vx.set_ylabel('vx [m/s]')
+    ax_vx.legend(loc='upper right')
+    ax_vx.grid(True)
+
+    line_vyaw_cmd, = ax_vyaw.plot([], [], color='tab:orange', label='vyaw cmd')
+    line_vyaw_real, = ax_vyaw.plot([], [], color='tab:blue', label='vyaw real')
+    ax_vyaw.set_ylim(-PLOT_VYAW_RANGE, PLOT_VYAW_RANGE)
+    ax_vyaw.set_ylabel('vyaw [rad/s]')
+    ax_vyaw.set_xlabel('time [s]')
+    ax_vyaw.legend(loc='upper right')
+    ax_vyaw.grid(True)
+    fig.tight_layout()
+
+    sim_time = 0.0
+
     for i in range(10*int(env.max_episode_length)):
         if has_viewer:
             if env.gym.query_viewer_has_closed(env.viewer):
@@ -101,6 +136,22 @@ def play(args):
         if has_viewer and follow_camera:
             robot_pos = env.root_states[0, :3].cpu().numpy()
             env.set_camera(robot_pos + CAMERA_OFFSET, robot_pos)
+
+        sim_time += env.dt
+        t_buf.append(sim_time)
+        vx_cmd_buf.append(commands[0].item())
+        vx_real_buf.append(env.base_lin_vel[0, 0].item())
+        vyaw_cmd_buf.append(commands[2].item())
+        vyaw_real_buf.append(env.base_ang_vel[0, 2].item())
+
+        if plt.fignum_exists(fig.number):
+            line_vx_cmd.set_data(t_buf, vx_cmd_buf)
+            line_vx_real.set_data(t_buf, vx_real_buf)
+            line_vyaw_cmd.set_data(t_buf, vyaw_cmd_buf)
+            line_vyaw_real.set_data(t_buf, vyaw_real_buf)
+            ax_vx.set_xlim(sim_time - PLOT_WINDOW_S, sim_time)
+            ax_vyaw.set_xlim(sim_time - PLOT_WINDOW_S, sim_time)
+            plt.pause(0.001)
 
 
 if __name__ == '__main__':

@@ -70,7 +70,8 @@ class GO2StairsCfg( LeggedRobotCfg ):
     class rewards( LeggedRobotCfg.rewards ):
         soft_dof_pos_limit = 0.9
         base_height_target = 0.25
-        
+        edge_height_threshold = 0.03 # [m], min height jump between neighboring terrain cells to count as a stair edge
+
         cycle_time = 0.5 # trot gait period [s]
         class scales:
             termination = -0.0
@@ -78,20 +79,25 @@ class GO2StairsCfg( LeggedRobotCfg ):
             tracking_ang_vel = 0.5
             lin_vel_z = -2.0
             ang_vel_xy = -0.05
+            # orientation = -0.2
             orientation = -0.
             torques = -0.0002
             dof_vel = -0.
             dof_acc = -2.5e-7
+            # base_height = -2.0
             base_height = -0.
             feet_air_time = 1.0
             collision = -1.
             feet_stumble = -0.0
             action_rate = -0.01
+            # stand_still = -0.5
             stand_still = -0.
             dof_pos_limits = -10.0
 
             # gait_phase = 0.18
             gait_phase = 0.
+            feet_edge = -0.0
+            hip_pos = -0.0
 
 class GO2StairsCfgPPO( LeggedRobotCfgPPO ):
     class algorithm( LeggedRobotCfgPPO.algorithm ):

@@ -1,7 +1,9 @@
+import numpy as np
 import torch
 import torch.nn as nn
 
 from isaacgym import gymapi, gymtorch
+from isaacgym.torch_utils import torch_rand_float
 
 from legged_gym.envs.base.legged_robot import LeggedRobot
 from legged_gym.utils.terrain import Terrain
@@ -40,6 +42,19 @@ class GO2Stairs(LeggedRobot):
         tm_params.restitution = self.cfg.terrain.restitution
         self.gym.add_triangle_mesh(self.sim, self.terrain.vertices.flatten(order='C'), self.terrain.triangles.flatten(order='C'), tm_params)
         self.height_samples = torch.tensor(self.terrain.heightsamples).view(self.terrain.tot_rows, self.terrain.tot_cols).to(self.device)
+        self._compute_edge_mask()
+
+    def _compute_edge_mask(self):
+        """ Marks heightfield cells that sit on a step edge (height jump to a neighboring
+            cell exceeds rewards.edge_height_threshold), used to penalize feet landing right
+            on the edge of a stair instead of solidly on a tread.
+        """
+        height_field = self.terrain.height_field_raw.astype(np.float32) * self.cfg.terrain.vertical_scale
+        threshold = self.cfg.rewards.edge_height_threshold
+        dx = np.abs(np.diff(height_field, axis=0, prepend=height_field[:1, :]))
+        dy = np.abs(np.diff(height_field, axis=1, prepend=height_field[:, :1]))
+        edge = (dx > threshold) | (dy > threshold)
+        self.x_edge_mask = torch.tensor(edge, device=self.device, dtype=torch.bool)
 
     def _get_env_origins(self):
         if self.cfg.terrain.mesh_type not in ['heightfield', 'trimesh']:
@@ -99,6 +114,10 @@ class GO2Stairs(LeggedRobot):
     def _init_buffers(self):
         super()._init_buffers()
         self._init_feet_state()
+        self.hip_indices = torch.tensor(
+            [i for i, name in enumerate(self.dof_names) if "hip" in name],
+            dtype=torch.long, device=self.device,
+        )
         if self.cfg.terrain.measure_heights:
             self.height_points = self._init_height_points()
             self.measured_heights = torch.zeros(self.num_envs, self.num_height_points, device=self.device, requires_grad=False)
@@ -107,9 +126,28 @@ class GO2Stairs(LeggedRobot):
     def _post_physics_step_callback(self):
         self._update_gait_phase()
         self.update_feet_state()
+        # NOTE: computed from self.last_contacts before _reward_feet_air_time (which runs
+        # later, in compute_reward) overwrites it with this step's contact state.
+        contact = self.contact_forces[:, self.feet_indices, 2] > 1.
+        self.contact_filt = torch.logical_or(contact, self.last_contacts)
         if self.cfg.terrain.measure_heights:
             self.measured_heights = self._get_heights()
         return super()._post_physics_step_callback()
+
+    def _resample_commands(self, env_ids):
+        """ Same lin_vel_x / lin_vel_y / ang_vel_yaw sampling as the base class (heading_command
+            is always False for this task), but zeroing vx and vyaw independently below their own
+            0.1 threshold instead of the base class's combined-xy-norm > 0.2 check.
+        """
+        self.commands[env_ids, 0] = torch_rand_float(
+            self.command_ranges["lin_vel_x"][0], self.command_ranges["lin_vel_x"][1], (len(env_ids), 1), device=self.device).squeeze(1)
+        self.commands[env_ids, 1] = torch_rand_float(
+            self.command_ranges["lin_vel_y"][0], self.command_ranges["lin_vel_y"][1], (len(env_ids), 1), device=self.device).squeeze(1)
+        self.commands[env_ids, 2] = torch_rand_float(
+            self.command_ranges["ang_vel_yaw"][0], self.command_ranges["ang_vel_yaw"][1], (len(env_ids), 1), device=self.device).squeeze(1)
+
+        self.commands[env_ids, 0] *= torch.abs(self.commands[env_ids, 0]) > 0.1
+        self.commands[env_ids, 2] *= torch.abs(self.commands[env_ids, 2]) > 0.1
 
     def _update_gait_phase(self):
         """ Trotting gait phase for the diagonal leg pairs (FL+RR / FR+RL).
@@ -167,3 +205,23 @@ class GO2Stairs(LeggedRobot):
             contact = self.contact_forces[:, self.feet_indices[i], 2] > 1.
             res += ~(contact ^ is_stance)
         return res * self.gait_enabled
+
+    def _reward_stand_still(self):
+        # Penalize motion away from the default pose, but only when vx, vy AND vyaw are all zero
+        return torch.sum(torch.abs(self.dof_pos - self.default_dof_pos), dim=1) * (~self.gait_enabled)
+
+    def _reward_feet_edge(self):
+        # Penalize feet contacting the terrain right on a stair edge (unstable foothold),
+        # only once the curriculum has advanced past the easiest terrain rows.
+        feet_pos_xy = ((self.feet_pos[:, :, :2] + self.terrain.cfg.border_size) / self.cfg.terrain.horizontal_scale).round().long()  # (num_envs, 4, 2)
+        feet_pos_xy[..., 0] = torch.clip(feet_pos_xy[..., 0], 0, self.x_edge_mask.shape[0] - 1)
+        feet_pos_xy[..., 1] = torch.clip(feet_pos_xy[..., 1], 0, self.x_edge_mask.shape[1] - 1)
+        feet_at_edge = self.x_edge_mask[feet_pos_xy[..., 0], feet_pos_xy[..., 1]]
+
+        self.feet_at_edge = self.contact_filt & feet_at_edge
+        rew = (self.terrain_levels > 3) * torch.sum(self.feet_at_edge, dim=-1)
+        return rew.float()
+
+    def _reward_hip_pos(self):
+        # Penalize hip joints drifting from their default angle (keeps the stance width stable)
+        return torch.sum(torch.square(self.dof_pos[:, self.hip_indices] - self.default_dof_pos[:, self.hip_indices]), dim=1)
