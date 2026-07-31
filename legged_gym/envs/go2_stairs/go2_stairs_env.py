@@ -598,6 +598,24 @@ class GO2Stairs(LeggedRobot):
         # depend on the height-scan implementation.
         return torch.square(self._stance_relative_base_height() - self.cfg.rewards.base_height_target)
 
+    def _reward_feet_air_time(self):
+        # Same as the base class (LeggedRobot), except the "is the robot actually trying to
+        # move" gate is self.gait_enabled (any of vx/vy/vyaw nonzero) instead of just
+        # norm(commands[:,:2]) - the base version zeroes this reward whenever vx=vy=0, which
+        # silently killed the only incentive to actually lift a foot during in-place rotation
+        # (vyaw-only commands). gait_phase alone doesn't fill that gap: it only checks whether
+        # contact timing matches the expected phase, which is satisfied ~50% of the time by
+        # coincidence even if no foot ever leaves the ground.
+        contact = self.contact_forces[:, self.feet_indices, 2] > 1.
+        contact_filt = torch.logical_or(contact, self.last_contacts)
+        self.last_contacts = contact
+        first_contact = (self.feet_air_time > 0.) * contact_filt
+        self.feet_air_time += self.dt
+        rew_airTime = torch.sum((self.feet_air_time - 0.5) * first_contact, dim=1)
+        rew_airTime *= self.gait_enabled
+        self.feet_air_time *= ~contact_filt
+        return rew_airTime
+
     def _gait_phase_match_count(self):
         # how many feet (0..len(feet_indices)) currently have their contact state matching the
         # expected trot stance/swing phase - shared by _reward_gait_phase and the
