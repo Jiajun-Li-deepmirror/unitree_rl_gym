@@ -1,11 +1,20 @@
 from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobotCfgPPO
 
 HEIGHT_LATENT_DIM = 32  # dim of the height-scan encoder's output latent (see height_encoder below)
+
+# Shape of the height-scan grid, in the base frame: x is forward(+)/backward(-), y is
+# left(+)/right(-). Edit these two lists to reshape the scan - e.g. drop the negative entries
+# in MEASURED_POINTS_X to stop sampling points behind the robot. Kept as module constants
+# (mirrored onto GO2StairsCfg.height_scan below) rather than only inside the class, so
+# NUM_HEIGHT_POINTS can be computed here before GO2StairsCfg itself is defined - edit these,
+# not the copies under `class height_scan`, or num_observations will fall out of sync.
+MEASURED_POINTS_X = [0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8]  # forward-only, same 17 points, 0.05 spacing
+MEASURED_POINTS_Y = [-0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5]
 # proprio (48, same layout as go2) + raw height-scan points. The height-scan encoder MLP now lives
 # inside ActorCriticHeightEncoder (see legged_gym/algorithms/height_actor_critic.py) so it's trained
 # end-to-end by PPO, instead of being a fixed/untrained encoder baked into the env observation - so
 # the env has to expose the *raw* height scan here, not an already-encoded latent.
-NUM_HEIGHT_POINTS = len(LeggedRobotCfg.terrain.measured_points_x) * len(LeggedRobotCfg.terrain.measured_points_y)
+NUM_HEIGHT_POINTS = len(MEASURED_POINTS_X) * len(MEASURED_POINTS_Y)
 
 class GO2StairsCfg( LeggedRobotCfg ):
     class env( LeggedRobotCfg.env ):
@@ -66,6 +75,12 @@ class GO2StairsCfg( LeggedRobotCfg ):
             ang_vel_yaw = [-0.75, 0.75] # min max [rad/s]
             heading = [-3.14, 3.14]
 
+    class height_scan:
+        # Shape of the height-scan grid - see the module-level MEASURED_POINTS_X/Y comment
+        # above for how to edit this (e.g. to drop the points behind the robot).
+        measured_points_x = MEASURED_POINTS_X
+        measured_points_y = MEASURED_POINTS_Y
+
     class height_encoder:
         # MLP that encodes the raw height-scan points into a latent appended to the observation
         hidden_dims = [128, 64]
@@ -85,9 +100,9 @@ class GO2StairsCfg( LeggedRobotCfg ):
         far_plane = 5.0  # [m]
         horizontal_fov = 87.0  # [deg] not in the datasheet either - typical for this class of stereo module
         mount_body = "Head_lower"  # front/chin mount point already present on the go2 URDF
-        mount_pos = [0.0, 0.0, 0.15]  # local offset from mount_body's own origin [m]
+        mount_pos = [0.05, 0.0, 0.15]  # local offset from mount_body's own origin [m]
         mount_pitch = 0.5236  # [rad] ~30 deg downward tilt, to see the ground/stairs ahead
-        fov_viz_length = 0.3  # [m] length of the small FOV pyramid drawn in play_keyboard.py
+        fov_viz_length = 0.1  # [m] length of the small FOV pyramid drawn in play_keyboard.py
 
     class control( LeggedRobotCfg.control ):
         # PD Drive parameters:
@@ -120,30 +135,22 @@ class GO2StairsCfg( LeggedRobotCfg ):
             lin_vel_z = -2.0
             ang_vel_xy = -0.05
             orientation = -0.2
-            # orientation = -0.
             torques = -0.0002
             dof_vel = -0.
             dof_acc = -2.5e-7
             base_height = -2.0
-            # base_height = -0.
             feet_air_time = 1.0
             collision = -1.
-            feet_stumble = -0.0
+            stumble = -1.0
             action_rate = -0.01
             # stand_still = -0.5
-            stand_still = -0.
             dof_pos_limits = -10.0
 
             # gait_phase = 0.18
-            gait_phase = 0.
             # feet_edge = -1.0
-            feet_edge = -0.0
             # hip_pos = -1.0
-            hip_pos = -0.0
             # stand_still_contact = 0.2
-            stand_still_contact = 0.0
             # dof_pos_deviation = -0.1
-            dof_pos_deviation = -0.
 
 class GO2StairsCfgPPO( LeggedRobotCfgPPO ):
     # trains the height-scan encoder jointly with the policy (see legged_gym/algorithms/)

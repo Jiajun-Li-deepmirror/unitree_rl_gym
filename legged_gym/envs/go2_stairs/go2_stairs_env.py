@@ -133,15 +133,20 @@ class GO2Stairs(LeggedRobot):
         self._compute_edge_mask()
 
     def _compute_edge_mask(self):
-        """ Marks heightfield cells that sit on a step edge (height jump to a neighboring
-            cell exceeds rewards.edge_height_threshold), used to penalize feet landing right
-            on the edge of a stair instead of solidly on a tread.
+        """ Marks heightfield cells that sit right next to a height jump exceeding
+            rewards.edge_height_threshold, used to penalize feet landing right on a stair edge
+            instead of solidly on a tread. A "prepend" diff alone only flags the cell on the
+            high side of each jump (the convex nosing/lip of the higher tread); the matching
+            "append" diff flags the cell on the low side too (the concave corner at the base
+            of the riser), so both sides of every edge get caught.
         """
         height_field = self.terrain.height_field_raw.astype(np.float32) * self.cfg.terrain.vertical_scale
         threshold = self.cfg.rewards.edge_height_threshold
-        dx = np.abs(np.diff(height_field, axis=0, prepend=height_field[:1, :]))
-        dy = np.abs(np.diff(height_field, axis=1, prepend=height_field[:, :1]))
-        edge = (dx > threshold) | (dy > threshold)
+        dx_hi = np.abs(np.diff(height_field, axis=0, prepend=height_field[:1, :]))
+        dx_lo = np.abs(np.diff(height_field, axis=0, append=height_field[-1:, :]))
+        dy_hi = np.abs(np.diff(height_field, axis=1, prepend=height_field[:, :1]))
+        dy_lo = np.abs(np.diff(height_field, axis=1, append=height_field[:, -1:]))
+        edge = (dx_hi > threshold) | (dx_lo > threshold) | (dy_hi > threshold) | (dy_lo > threshold)
         self.x_edge_mask = torch.tensor(edge, device=self.device, dtype=torch.bool)
 
     def _reset_root_states(self, env_ids):
@@ -212,8 +217,8 @@ class GO2Stairs(LeggedRobot):
         self.env_origins[env_ids] = self.terrain_origins[self.terrain_levels[env_ids], self.terrain_types[env_ids]]
 
     def _init_height_points(self):
-        y = torch.tensor(self.cfg.terrain.measured_points_y, device=self.device, requires_grad=False)
-        x = torch.tensor(self.cfg.terrain.measured_points_x, device=self.device, requires_grad=False)
+        y = torch.tensor(self.cfg.height_scan.measured_points_y, device=self.device, requires_grad=False)
+        x = torch.tensor(self.cfg.height_scan.measured_points_x, device=self.device, requires_grad=False)
         grid_x, grid_y = torch.meshgrid(x, y)
         self.num_height_points = grid_x.numel()
         points = torch.zeros(self.num_envs, self.num_height_points, 3, device=self.device, requires_grad=False)
