@@ -264,15 +264,19 @@ class GO2Stairs(LeggedRobot):
         return points
 
     def _get_heights(self):
+        # nearest-cell lookup (round, not floor+min-of-neighbors): the old min(px,py / px+1,py /
+        # px,py+1) only ever looked in the +x/+y direction, which is a no-op on an ascending
+        # staircase (that neighbor is same-or-higher) but silently pulls the reading down to the
+        # next (lower) tread's height on a descending one - systematically under-reporting height
+        # right at the edge cell of every downward step, never on upward ones.
         world_points = quat_apply_yaw(self.base_quat.repeat(1, self.num_height_points), self.height_points) \
             + self.root_states[:, :3].unsqueeze(1)
         points = world_points + self.terrain.cfg.border_size
-        points = (points / self.terrain.cfg.horizontal_scale).long()
-        px = torch.clip(points[:, :, 0].view(-1), 0, self.height_samples.shape[0] - 2)
-        py = torch.clip(points[:, :, 1].view(-1), 0, self.height_samples.shape[1] - 2)
+        points = (points / self.terrain.cfg.horizontal_scale).round().long()
+        px = torch.clip(points[:, :, 0].view(-1), 0, self.height_samples.shape[0] - 1)
+        py = torch.clip(points[:, :, 1].view(-1), 0, self.height_samples.shape[1] - 1)
 
-        heights = torch.min(self.height_samples[px, py], self.height_samples[px + 1, py])
-        heights = torch.min(heights, self.height_samples[px, py + 1])
+        heights = self.height_samples[px, py]
         return heights.view(self.num_envs, -1) * self.terrain.cfg.vertical_scale
 
     def _draw_debug_vis(self):
@@ -288,13 +292,11 @@ class GO2Stairs(LeggedRobot):
         world_points = quat_apply_yaw(self.base_quat.repeat(1, self.num_height_points), self.height_points) \
             + self.root_states[:, :3].unsqueeze(1)
         idx_points = world_points + self.terrain.cfg.border_size
-        idx_points = (idx_points / self.terrain.cfg.horizontal_scale).long()
-        px = torch.clip(idx_points[:, :, 0].view(-1), 0, self.height_samples.shape[0] - 2)
-        py = torch.clip(idx_points[:, :, 1].view(-1), 0, self.height_samples.shape[1] - 2)
+        idx_points = (idx_points / self.terrain.cfg.horizontal_scale).round().long()
+        px = torch.clip(idx_points[:, :, 0].view(-1), 0, self.height_samples.shape[0] - 1)
+        py = torch.clip(idx_points[:, :, 1].view(-1), 0, self.height_samples.shape[1] - 1)
 
-        heights = torch.min(self.height_samples[px, py], self.height_samples[px + 1, py])
-        heights = torch.min(heights, self.height_samples[px, py + 1])
-        heights = (heights.view(self.num_envs, -1) * self.terrain.cfg.vertical_scale).cpu().numpy()
+        heights = (self.height_samples[px, py].view(self.num_envs, -1) * self.terrain.cfg.vertical_scale).cpu().numpy()
         is_edge = self.x_edge_mask[px, py].view(self.num_envs, -1).cpu().numpy()
         world_xy = world_points[:, :, :2].cpu().numpy()
 
@@ -305,6 +307,31 @@ class GO2Stairs(LeggedRobot):
                 pose = gymapi.Transform(gymapi.Vec3(float(world_xy[i, j, 0]), float(world_xy[i, j, 1]), float(heights[i, j])))
                 geom = red if is_edge[i, j] else green
                 gymutil.draw_lines(geom, self.gym, self.viewer, self.envs[i], pose)
+
+        # the height-scan spheres above are a fixed grid around the base, NOT the feet - they
+        # don't tell you anything about what _reward_feet_edge is actually seeing. Draw the 4
+        # feet separately, using the exact same lookup _reward_feet_edge uses, so "is this foot
+        # on an edge" can actually be checked visually instead of eyeballing the scan grid.
+        feet_at_edge = self._feet_at_edge().cpu().numpy()
+        feet_xy = self.feet_pos[:, :, :2].cpu().numpy()
+        feet_z = self.feet_pos[:, :, 2].cpu().numpy()
+        foot_green = gymutil.WireframeSphereGeometry(0.03, 8, 8, None, color=(0, 1, 0))
+        foot_red = gymutil.WireframeSphereGeometry(0.045, 8, 8, None, color=(1, 0, 0))
+        for i in range(self.num_envs):
+            for k in range(feet_at_edge.shape[1]):
+                pose = gymapi.Transform(gymapi.Vec3(float(feet_xy[i, k, 0]), float(feet_xy[i, k, 1]), float(feet_z[i, k])))
+                geom = foot_red if feet_at_edge[i, k] else foot_green
+                gymutil.draw_lines(geom, self.gym, self.viewer, self.envs[i], pose)
+
+    def _feet_at_edge(self):
+        """ Which feet currently sit on an x_edge_mask cell, regardless of contact - shared by
+            _reward_feet_edge (which additionally requires contact) and the debug-vis markers
+            above, so the visualization can never disagree with what the reward actually sees.
+        """
+        feet_pos_xy = ((self.feet_pos[:, :, :2] + self.terrain.cfg.border_size) / self.cfg.terrain.horizontal_scale).long()
+        feet_pos_xy[..., 0] = torch.clip(feet_pos_xy[..., 0], 0, self.x_edge_mask.shape[0] - 1)
+        feet_pos_xy[..., 1] = torch.clip(feet_pos_xy[..., 1], 0, self.x_edge_mask.shape[1] - 1)
+        return self.x_edge_mask[feet_pos_xy[..., 0], feet_pos_xy[..., 1]]
 
     def _draw_camera_fov(self, color=(1.0, 0.6, 0.0)):
         """ Draws a small wireframe pyramid from the depth camera's current position out to a
@@ -591,12 +618,7 @@ class GO2Stairs(LeggedRobot):
     def _reward_feet_edge(self):
         # Penalize feet contacting the terrain right on a stair edge (unstable foothold),
         # only once the curriculum has advanced past the easiest terrain rows.
-        feet_pos_xy = ((self.feet_pos[:, :, :2] + self.terrain.cfg.border_size) / self.cfg.terrain.horizontal_scale).round().long()  # (num_envs, 4, 2)
-        feet_pos_xy[..., 0] = torch.clip(feet_pos_xy[..., 0], 0, self.x_edge_mask.shape[0] - 1)
-        feet_pos_xy[..., 1] = torch.clip(feet_pos_xy[..., 1], 0, self.x_edge_mask.shape[1] - 1)
-        feet_at_edge = self.x_edge_mask[feet_pos_xy[..., 0], feet_pos_xy[..., 1]]
-
-        self.feet_at_edge = self.contact_filt & feet_at_edge
+        self.feet_at_edge = self.contact_filt & self._feet_at_edge()
         rew = (self.terrain_levels > 3) * torch.sum(self.feet_at_edge, dim=-1)
         return rew.float()
 
