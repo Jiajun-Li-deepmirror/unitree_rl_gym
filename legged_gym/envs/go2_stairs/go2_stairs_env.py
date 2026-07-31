@@ -112,7 +112,7 @@ class GO2Stairs(LeggedRobot):
         # border_size (see _create_trimesh), which exactly cancels the border_px pixel
         # padding baked into every x/y index here. So this must NOT add border_px/y0 back in,
         # or the spawn point ends up shifted by a full border_size (default 25m) off the mesh.
-        spawn_margin_px = min(max(round(0.3 / horizontal_scale), 1), run_up_px)
+        spawn_margin_px = min(max(round(0.6 / horizontal_scale), 1), run_up_px)
         spawn_x = (run_up_px - spawn_margin_px) * horizontal_scale
         spawn_y = (flight_width_px / 2) * horizontal_scale
         terrain.env_origins = np.array([[[spawn_x, spawn_y, 0.0]]])  # (num_rows=1, num_cols=1, 3)
@@ -177,7 +177,39 @@ class GO2Stairs(LeggedRobot):
         self.terrain_types = torch.div(torch.arange(self.num_envs, device=self.device),
                                         (self.num_envs / self.cfg.terrain.num_cols), rounding_mode='floor').to(torch.long)
         self.terrain_origins = torch.from_numpy(self.terrain.env_origins).to(self.device).to(torch.float)
+        self.max_terrain_level = self.cfg.terrain.num_rows
         self.env_origins[:] = self.terrain_origins[self.terrain_levels, self.terrain_types]
+
+    def reset_idx(self, env_ids):
+        run_curriculum = len(env_ids) > 0 and self.cfg.terrain.curriculum and not self.cfg.terrain.u_shape_playground
+        if run_curriculum:
+            self._update_terrain_curriculum(env_ids)
+        super().reset_idx(env_ids)
+        if run_curriculum:
+            # so terrain difficulty progression is visible in tensorboard, same as
+            # command curriculum's "max_command_x" a few lines up in the base class
+            self.extras["episode"]["terrain_level"] = torch.mean(self.terrain_levels.float())
+
+    def _update_terrain_curriculum(self, env_ids):
+        """ Moves each env to a harder terrain row if it walked far enough this episode (past
+            half the terrain tile length), or an easier one if it barely covered the ground its
+            own commanded speed implied it should have. Must run BEFORE _reset_dofs/
+            _reset_root_states (hence the reset_idx override above, calling this first) since it
+            reads the pre-reset root_states and updates env_origins in place, which the reset
+            then spawns the robot at.
+        """
+        if not self.init_done:
+            return
+        distance = torch.norm(self.root_states[env_ids, :2] - self.env_origins[env_ids, :2], dim=1)
+        move_up = distance > self.terrain.env_length / 2
+        move_down = (distance < torch.norm(self.commands[env_ids, :2], dim=1) * self.max_episode_length_s * 0.5) & ~move_up
+        self.terrain_levels[env_ids] += 1 * move_up - 1 * move_down
+        self.terrain_levels[env_ids] = torch.where(
+            self.terrain_levels[env_ids] >= self.max_terrain_level,
+            torch.randint_like(self.terrain_levels[env_ids], self.max_terrain_level),
+            torch.clip(self.terrain_levels[env_ids], 0),
+        )
+        self.env_origins[env_ids] = self.terrain_origins[self.terrain_levels[env_ids], self.terrain_types[env_ids]]
 
     def _init_height_points(self):
         y = torch.tensor(self.cfg.terrain.measured_points_y, device=self.device, requires_grad=False)

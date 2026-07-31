@@ -9,8 +9,8 @@ NUM_HEIGHT_POINTS = len(LeggedRobotCfg.terrain.measured_points_x) * len(LeggedRo
 
 class GO2StairsCfg( LeggedRobotCfg ):
     class env( LeggedRobotCfg.env ):
-        num_envs = 4096
-        # num_envs = 2048
+        # num_envs = 4096
+        num_envs = 2048
         num_observations = 48 + NUM_HEIGHT_POINTS  # proprio (48) + raw height-scan points
 
     class init_state( LeggedRobotCfg.init_state ):
@@ -47,7 +47,7 @@ class GO2StairsCfg( LeggedRobotCfg ):
             num_steps = 12       # steps per flight
             step_width = 0.3     # [m] depth of each step
             step_height = 0.12   # [m] rise of each step
-            flight_width = 1.2   # [m] width of each flight
+            flight_width = 2.0   # [m] width of each flight
             platform_size = 1.0  # [m] flat spawn run-up / mid-turn landing length
             top_platform_size = 1.5  # [m] flat landing at the top of flight 2
 
@@ -151,3 +151,4 @@ class GO2StairsCfgPPO( LeggedRobotCfgPPO ):
         run_name = ''
         experiment_name = 'stairs_go2'
         max_iterations = 3000
+        save_interval = 100
