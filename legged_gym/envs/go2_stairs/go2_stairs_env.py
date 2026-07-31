@@ -6,7 +6,7 @@ import numpy as np
 import torch
 
 from isaacgym import gymapi, gymtorch, gymutil, terrain_utils
-from isaacgym.torch_utils import torch_rand_float
+from isaacgym.torch_utils import torch_rand_float, quat_from_euler_xyz
 
 from legged_gym.envs.base.legged_robot import LeggedRobot
 from legged_gym.utils.terrain import Terrain
@@ -151,7 +151,23 @@ class GO2Stairs(LeggedRobot):
 
     def _reset_root_states(self, env_ids):
         if not self.cfg.terrain.u_shape_playground:
-            return super()._reset_root_states(env_ids)
+            super()._reset_root_states(env_ids)
+            # override two things about the base class's reset:
+            # - random spawn yaw, so the policy doesn't overfit to always facing the same
+            #   direction relative to the terrain curriculum grid (base class spawns at the
+            #   fixed cfg.init_state.rot orientation otherwise)
+            # - zero spawn velocity instead of the base class's random +-0.5 m/s / rad/s - after
+            #   a fall (or timeout) the robot should restart cleanly at rest, not already
+            #   drifting/spinning
+            yaw = torch_rand_float(-math.pi, math.pi, (len(env_ids), 1), device=self.device).squeeze(1)
+            zeros = torch.zeros_like(yaw)
+            self.root_states[env_ids, 3:7] = quat_from_euler_xyz(zeros, zeros, yaw)
+            self.root_states[env_ids, 7:13] = 0.
+            env_ids_int32 = env_ids.to(dtype=torch.int32)
+            self.gym.set_actor_root_state_tensor_indexed(
+                self.sim, gymtorch.unwrap_tensor(self.root_states),
+                gymtorch.unwrap_tensor(env_ids_int32), len(env_ids_int32))
+            return
         # same as the base class, but skips its +-1m random xy jitter: on this compact
         # showcase platform that jitter can dump the robot onto the first step or past the
         # platform edge, defeating the point of a fixed, deliberately placed spawn point
@@ -194,6 +210,27 @@ class GO2Stairs(LeggedRobot):
             # so terrain difficulty progression is visible in tensorboard, same as
             # command curriculum's "max_command_x" a few lines up in the base class
             self.extras["episode"]["terrain_level"] = torch.mean(self.terrain_levels.float())
+        if len(env_ids) > 0:
+            self._log_monitoring_metrics(env_ids)
+
+    def _log_monitoring_metrics(self, env_ids):
+        """ Reports two metrics to tensorboard (extras["episode"], same mechanism as
+            terrain_level above) that have no reward attached and don't affect training -
+            purely for watching how well standing-still/rotating-in-place are executed.
+        """
+        stand_mask = self.stand_still_height_err_count[env_ids] > 0
+        if stand_mask.any():
+            mean_err = self.stand_still_height_err_sum[env_ids] / self.stand_still_height_err_count[env_ids].clamp(min=1)
+            self.extras["episode"]["stand_still_base_height_error"] = torch.mean(mean_err[stand_mask])
+        self.stand_still_height_err_sum[env_ids] = 0.
+        self.stand_still_height_err_count[env_ids] = 0.
+
+        rotate_mask = self.rotate_ang_vel_err_count[env_ids] > 0
+        if rotate_mask.any():
+            mean_err = self.rotate_ang_vel_err_sum[env_ids] / self.rotate_ang_vel_err_count[env_ids].clamp(min=1)
+            self.extras["episode"]["rotate_in_place_ang_vel_error"] = torch.mean(mean_err[rotate_mask])
+        self.rotate_ang_vel_err_sum[env_ids] = 0.
+        self.rotate_ang_vel_err_count[env_ids] = 0.
 
     def _update_terrain_curriculum(self, env_ids):
         """ Moves each env to a harder terrain row if it walked far enough this episode (past
@@ -389,6 +426,15 @@ class GO2Stairs(LeggedRobot):
             self.height_points = self._init_height_points()
             self.measured_heights = torch.zeros(self.num_envs, self.num_height_points, device=self.device, requires_grad=False)
 
+        # monitoring-only accumulators (tensorboard via extras["episode"], no reward attached -
+        # see reset_idx): mean |base height error| while standing still, and mean |vyaw error|
+        # while rotating in place, both averaged over however many steps each env actually spent
+        # in that state during the episode.
+        self.stand_still_height_err_sum = torch.zeros(self.num_envs, device=self.device)
+        self.stand_still_height_err_count = torch.zeros(self.num_envs, device=self.device)
+        self.rotate_ang_vel_err_sum = torch.zeros(self.num_envs, device=self.device)
+        self.rotate_ang_vel_err_count = torch.zeros(self.num_envs, device=self.device)
+
     def _post_physics_step_callback(self):
         self._update_gait_phase()
         self.update_feet_state()
@@ -398,6 +444,18 @@ class GO2Stairs(LeggedRobot):
         self.contact_filt = torch.logical_or(contact, self.last_contacts)
         if self.cfg.terrain.measure_heights:
             self.measured_heights = self._get_heights()
+
+        is_standing_still = ~self.gait_enabled
+        base_height_error = torch.abs(self._stance_relative_base_height() - self.cfg.rewards.base_height_target)
+        self.stand_still_height_err_sum += base_height_error * is_standing_still
+        self.stand_still_height_err_count += is_standing_still.float()
+
+        is_rotating_in_place = (torch.abs(self.commands[:, 0]) < 1e-6) & (torch.abs(self.commands[:, 1]) < 1e-6) \
+            & (torch.abs(self.commands[:, 2]) > 1e-6)
+        ang_vel_error = torch.abs(self.base_ang_vel[:, 2] - self.commands[:, 2])
+        self.rotate_ang_vel_err_sum += ang_vel_error * is_rotating_in_place
+        self.rotate_ang_vel_err_count += is_rotating_in_place.float()
+
         return super()._post_physics_step_callback()
 
     def _resample_commands(self, env_ids):
@@ -475,15 +533,20 @@ class GO2Stairs(LeggedRobot):
         if self.add_noise:
             self.obs_buf += (2 * torch.rand_like(self.obs_buf) - 1) * self.noise_scale_vec
 
+    def _stance_relative_base_height(self):
+        # Base height measured relative to the feet currently on the ground (not the world
+        # z=0 plane, since the stairs terrain isn't flat) - shared by _reward_base_height and
+        # the (non-training) stand_still_base_height_error monitoring metric below.
+        contact = (self.contact_forces[:, self.feet_indices, 2] > 1.).float()
+        contact_count = contact.sum(dim=1).clamp(min=1)
+        stance_height = (self.feet_pos[:, :, 2] * contact).sum(dim=1) / contact_count
+        return self.root_states[:, 2] - stance_height
+
     def _reward_base_height(self):
         # Penalize base height away from target, measured relative to the feet currently on the
         # ground (not the world z=0 plane, since the stairs terrain isn't flat) so this doesn't
         # depend on the height-scan implementation.
-        contact = (self.contact_forces[:, self.feet_indices, 2] > 1.).float()
-        contact_count = contact.sum(dim=1).clamp(min=1)
-        stance_height = (self.feet_pos[:, :, 2] * contact).sum(dim=1) / contact_count
-        base_height = self.root_states[:, 2] - stance_height
-        return torch.square(base_height - self.cfg.rewards.base_height_target)
+        return torch.square(self._stance_relative_base_height() - self.cfg.rewards.base_height_target)
 
     def _reward_gait_phase(self):
         # reward feet contact state matching the expected stance/swing of the trot phase
@@ -493,6 +556,20 @@ class GO2Stairs(LeggedRobot):
             contact = self.contact_forces[:, self.feet_indices[i], 2] > 1.
             res += ~(contact ^ is_stance)
         return res * self.gait_enabled
+
+    def _reward_feet_swing_height(self):
+        # Penalize swing (non-contact) feet for missing cfg.rewards.feet_swing_height_target
+        # clearance above the terrain directly beneath them (not world z, since the stairs
+        # terrain isn't flat), only while actually gaited (moving) - same gate as _reward_gait_phase.
+        feet_pos_xy = ((self.feet_pos[:, :, :2] + self.terrain.cfg.border_size) / self.cfg.terrain.horizontal_scale).round().long()  # (num_envs, 4, 2)
+        feet_pos_xy[..., 0] = torch.clip(feet_pos_xy[..., 0], 0, self.height_samples.shape[0] - 1)
+        feet_pos_xy[..., 1] = torch.clip(feet_pos_xy[..., 1], 0, self.height_samples.shape[1] - 1)
+        terrain_height = self.height_samples[feet_pos_xy[..., 0], feet_pos_xy[..., 1]] * self.terrain.cfg.vertical_scale
+        clearance = self.feet_pos[:, :, 2] - terrain_height
+
+        contact = self.contact_forces[:, self.feet_indices, 2] > 1.
+        swing_error = torch.square(clearance - self.cfg.rewards.feet_swing_height_target) * (~contact)
+        return torch.sum(swing_error, dim=1) * self.gait_enabled
 
     def _reward_stand_still(self):
         # Penalize motion away from the default pose, but only when vx, vy AND vyaw are all zero

@@ -128,6 +128,7 @@ class GO2StairsCfg( LeggedRobotCfg ):
 
         edge_height_threshold = 0.03 # [m], min height jump between neighboring terrain cells to count as a stair edge
         cycle_time = 0.5 # trot gait period [s]
+        feet_swing_height_target = 0.10 # [m], target swing-foot clearance above the terrain while gaited
         class scales:
             termination = -0.0
             tracking_lin_vel = 1.0
@@ -139,16 +140,17 @@ class GO2StairsCfg( LeggedRobotCfg ):
             dof_vel = -0.
             dof_acc = -2.5e-7
             base_height = -2.0
-            feet_air_time = 1.0
+            # feet_air_time = 1.0
             collision = -1.
             stumble = -1.0
             action_rate = -0.01
-            # stand_still = -0.5
+            stand_still = -0.5
             dof_pos_limits = -10.0
 
-            # gait_phase = 0.18
-            # feet_edge = -1.0
-            # hip_pos = -1.0
+            gait_phase = 0.18
+            feet_swing_height = -10.0
+            feet_edge = -1.0
+            hip_pos = -1.0
             # stand_still_contact = 0.2
             # dof_pos_deviation = -0.1
 
