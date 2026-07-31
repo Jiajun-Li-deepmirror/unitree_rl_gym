@@ -217,18 +217,24 @@ class GO2Stairs(LeggedRobot):
         """ Reports two metrics to tensorboard (extras["episode"], same mechanism as
             terrain_level above) that have no reward attached and don't affect training -
             purely for watching how well standing-still/rotating-in-place are executed.
+
+            NOTE: both keys must be set on *every* call, even when the mask below is all-False
+            (falling back to a 0 placeholder) - rsl_rl's OnPolicyRunner.log() reads the key set
+            from the first entry in ep_infos and indexes every other entry with it, so if one
+            reset batch here omitted a key that an earlier/later batch in the same rollout had,
+            it crashes with a KeyError instead of just skipping it.
         """
         stand_mask = self.stand_still_height_err_count[env_ids] > 0
-        if stand_mask.any():
-            mean_err = self.stand_still_height_err_sum[env_ids] / self.stand_still_height_err_count[env_ids].clamp(min=1)
-            self.extras["episode"]["stand_still_base_height_error"] = torch.mean(mean_err[stand_mask])
+        mean_err = self.stand_still_height_err_sum[env_ids] / self.stand_still_height_err_count[env_ids].clamp(min=1)
+        self.extras["episode"]["stand_still_base_height_error"] = (
+            torch.mean(mean_err[stand_mask]) if stand_mask.any() else torch.zeros((), device=self.device))
         self.stand_still_height_err_sum[env_ids] = 0.
         self.stand_still_height_err_count[env_ids] = 0.
 
         rotate_mask = self.rotate_ang_vel_err_count[env_ids] > 0
-        if rotate_mask.any():
-            mean_err = self.rotate_ang_vel_err_sum[env_ids] / self.rotate_ang_vel_err_count[env_ids].clamp(min=1)
-            self.extras["episode"]["rotate_in_place_ang_vel_error"] = torch.mean(mean_err[rotate_mask])
+        mean_err = self.rotate_ang_vel_err_sum[env_ids] / self.rotate_ang_vel_err_count[env_ids].clamp(min=1)
+        self.extras["episode"]["rotate_in_place_ang_vel_error"] = (
+            torch.mean(mean_err[rotate_mask]) if rotate_mask.any() else torch.zeros((), device=self.device))
         self.rotate_ang_vel_err_sum[env_ids] = 0.
         self.rotate_ang_vel_err_count[env_ids] = 0.
 
