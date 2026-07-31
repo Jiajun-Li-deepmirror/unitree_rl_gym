@@ -9,8 +9,8 @@ NUM_HEIGHT_POINTS = len(LeggedRobotCfg.terrain.measured_points_x) * len(LeggedRo
 
 class GO2StairsCfg( LeggedRobotCfg ):
     class env( LeggedRobotCfg.env ):
-        # num_envs = 4096
-        num_envs = 2048
+        num_envs = 4096
+        # num_envs = 2048
         num_observations = 48 + NUM_HEIGHT_POINTS  # proprio (48) + raw height-scan points
 
     class init_state( LeggedRobotCfg.init_state ):
@@ -57,6 +57,9 @@ class GO2StairsCfg( LeggedRobotCfg ):
         num_commands = 4
         resampling_time = 10. # time before commands are changed [s]
         heading_command = False
+        # how each resampled command is drawn: [stand still, rotate in place, normal velocity]
+        command_proportions = [0.2, 0.2, 0.6]
+        rotate_in_place_ang_vel_min = 0.1 # [rad/s], floor on |vyaw| so "rotate" never degrades to ~0
         class ranges:
             lin_vel_x = [0.0, 1.2]   # min max [m/s], slower than flat ground for stair climbing
             lin_vel_y = [0.0, 0.0]   # min max [m/s]
@@ -69,11 +72,6 @@ class GO2StairsCfg( LeggedRobotCfg ):
         latent_dim = HEIGHT_LATENT_DIM
 
     class camera:
-        # Depth camera mounted on the robot's head, for a future camera-based student policy
-        # (see [[height-encoder-runner-plan]]). Only ever enabled interactively, via
-        # play_keyboard.py's --use_camera flag - never during training: num_envs there is 1,
-        # whereas rendering a depth camera for thousands of parallel training envs would be
-        # prohibitively expensive and isn't needed yet (the teacher trains on the height scan).
         use_camera = False
         # resolution/fps: Depth Output Resolution "Up to 544 x 640" @ "Up to 15 fps"
         width = 544
@@ -121,8 +119,8 @@ class GO2StairsCfg( LeggedRobotCfg ):
             tracking_ang_vel = 0.5
             lin_vel_z = -2.0
             ang_vel_xy = -0.05
-            # orientation = -0.2
-            orientation = -0.
+            orientation = -0.2
+            # orientation = -0.
             torques = -0.0002
             dof_vel = -0.
             dof_acc = -2.5e-7

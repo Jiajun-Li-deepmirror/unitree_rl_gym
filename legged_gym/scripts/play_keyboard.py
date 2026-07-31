@@ -4,8 +4,9 @@ from collections import deque
 
 import isaacgym
 from isaacgym import gymapi
+from legged_gym import LEGGED_GYM_ROOT_DIR
 from legged_gym.envs import *
-from legged_gym.utils import get_args, task_registry
+from legged_gym.utils import get_args, get_load_path, task_registry
 
 import cv2
 import numpy as np
@@ -78,6 +79,13 @@ def play(args):
     ppo_runner, train_cfg = task_registry.make_alg_runner(env=env, name=args.task, args=args, train_cfg=train_cfg)
     policy = ppo_runner.get_inference_policy(device=env.device)
 
+    # e.g. "Jul30_05-16-51_/model_800.pt" -> "Jul30_05-16-51_/800", for the plot window title
+    log_root = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name)
+    resume_path = get_load_path(log_root, load_run=train_cfg.runner.load_run, checkpoint=train_cfg.runner.checkpoint)
+    run_name = os.path.basename(os.path.dirname(resume_path))
+    checkpoint = os.path.splitext(os.path.basename(resume_path))[0].rsplit('_', 1)[-1]
+    run_label = f"{run_name}/{checkpoint}"
+
     has_viewer = env.viewer is not None
     if has_viewer:
         for key, action in KEY_ACTIONS.items():
@@ -104,6 +112,7 @@ def play(args):
 
     plt.ion()
     fig, (ax_vx, ax_vyaw) = plt.subplots(2, 1, figsize=(6, 4.5), sharex=True)
+    fig.canvas.manager.set_window_title(run_label)
     line_vx_cmd, = ax_vx.plot([], [], color='tab:orange', label='vx cmd')
     line_vx_real, = ax_vx.plot([], [], color='tab:blue', label='vx real')
     ax_vx.set_ylim(-PLOT_VX_RANGE, PLOT_VX_RANGE)
@@ -169,12 +178,6 @@ def play(args):
                 env.set_camera(robot_pos + CAMERA_OFFSET, robot_pos)
 
             if use_camera and i % camera_step_interval == 0:
-                # throttled to the camera's own fps, not every sim step - still real-time, just
-                # not wastefully recaptured faster than the camera itself updates. The FOV
-                # wireframe itself is drawn every frame by env.render() (not here), alongside
-                # the height-scan spheres - drawing it separately on its own throttled cadence
-                # meant clear_lines() was wiping out that frame's spheres, which is what caused
-                # the flicker.
                 depth_img = env.get_camera_depth_image()
                 cv2.imshow(DEPTH_WINDOW_NAME, _depth_to_gray(depth_img, cam_cfg.near_plane, cam_cfg.far_plane))
                 cv2.waitKey(1)

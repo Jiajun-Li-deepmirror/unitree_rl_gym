@@ -396,19 +396,40 @@ class GO2Stairs(LeggedRobot):
         return super()._post_physics_step_callback()
 
     def _resample_commands(self, env_ids):
-        """ Same lin_vel_x / lin_vel_y / ang_vel_yaw sampling as the base class (heading_command
-            is always False for this task), but zeroing vx and vyaw independently below their own
-            0.1 threshold instead of the base class's combined-xy-norm > 0.2 check.
+        """ Draws each env's new command from one of three categories (cfg.commands.
+            command_proportions): stand still (all zero), rotate in place (vx=vy=0, |vyaw|
+            floored so it never degrades to ~0), or normal velocity sampling - same lin_vel_x/
+            lin_vel_y/ang_vel_yaw ranges as the base class (heading_command is always False for
+            this task), but zeroing vx/vyaw independently below their own 0.1 threshold instead
+            of the base class's combined-xy-norm > 0.2 check.
         """
-        self.commands[env_ids, 0] = torch_rand_float(
-            self.command_ranges["lin_vel_x"][0], self.command_ranges["lin_vel_x"][1], (len(env_ids), 1), device=self.device).squeeze(1)
-        self.commands[env_ids, 1] = torch_rand_float(
-            self.command_ranges["lin_vel_y"][0], self.command_ranges["lin_vel_y"][1], (len(env_ids), 1), device=self.device).squeeze(1)
-        self.commands[env_ids, 2] = torch_rand_float(
-            self.command_ranges["ang_vel_yaw"][0], self.command_ranges["ang_vel_yaw"][1], (len(env_ids), 1), device=self.device).squeeze(1)
+        proportions = torch.cumsum(torch.tensor(self.cfg.commands.command_proportions, device=self.device), dim=0)
+        choice = torch.rand(len(env_ids), device=self.device) * proportions[-1]
+        stand_ids = env_ids[choice < proportions[0]]
+        rotate_ids = env_ids[(choice >= proportions[0]) & (choice < proportions[1])]
+        normal_ids = env_ids[choice >= proportions[1]]
 
-        self.commands[env_ids, 0] *= torch.abs(self.commands[env_ids, 0]) > 0.1
-        self.commands[env_ids, 2] *= torch.abs(self.commands[env_ids, 2]) > 0.1
+        self.commands[stand_ids, :3] = 0.
+
+        if len(rotate_ids) > 0:
+            vyaw_min = self.cfg.commands.rotate_in_place_ang_vel_min
+            vyaw_max = self.command_ranges["ang_vel_yaw"][1]
+            mag = torch_rand_float(vyaw_min, vyaw_max, (len(rotate_ids), 1), device=self.device).squeeze(1)
+            sign = torch.sign(torch_rand_float(-1., 1., (len(rotate_ids), 1), device=self.device).squeeze(1))
+            self.commands[rotate_ids, 0] = 0.
+            self.commands[rotate_ids, 1] = 0.
+            self.commands[rotate_ids, 2] = mag * sign
+
+        if len(normal_ids) > 0:
+            self.commands[normal_ids, 0] = torch_rand_float(
+                self.command_ranges["lin_vel_x"][0], self.command_ranges["lin_vel_x"][1], (len(normal_ids), 1), device=self.device).squeeze(1)
+            self.commands[normal_ids, 1] = torch_rand_float(
+                self.command_ranges["lin_vel_y"][0], self.command_ranges["lin_vel_y"][1], (len(normal_ids), 1), device=self.device).squeeze(1)
+            self.commands[normal_ids, 2] = torch_rand_float(
+                self.command_ranges["ang_vel_yaw"][0], self.command_ranges["ang_vel_yaw"][1], (len(normal_ids), 1), device=self.device).squeeze(1)
+
+            self.commands[normal_ids, 0] *= torch.abs(self.commands[normal_ids, 0]) > 0.1
+            self.commands[normal_ids, 2] *= torch.abs(self.commands[normal_ids, 2]) > 0.1
 
     def _update_gait_phase(self):
         """ Trotting gait phase for the diagonal leg pairs (FL+RR / FR+RL).
