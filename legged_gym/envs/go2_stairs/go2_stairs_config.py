@@ -20,7 +20,7 @@ class GO2StairsCfg( LeggedRobotCfg ):
     class env( LeggedRobotCfg.env ):
         num_envs = 4096
         # num_envs = 2048
-        num_observations = 48 + NUM_HEIGHT_POINTS  # proprio (48) + raw height-scan points
+        num_observations = 48 + 2 + 3 + NUM_HEIGHT_POINTS  # proprio (48) + gait sin/cos phase (2) + command-mode one-hot (3) + raw height-scan points
 
     class init_state( LeggedRobotCfg.init_state ):
         pos = [0.0, 0.0, 0.42] # x,y,z [m]
@@ -66,11 +66,10 @@ class GO2StairsCfg( LeggedRobotCfg ):
         num_commands = 4
         resampling_time = 10. # time before commands are changed [s]
         heading_command = False
-        # how each resampled command is drawn: [stand still, rotate in place, normal velocity]
         command_proportions = [0.2, 0.2, 0.6]
         rotate_in_place_ang_vel_min = 0.1 # [rad/s], floor on |vyaw| so "rotate" never degrades to ~0
         class ranges:
-            lin_vel_x = [0.0, 1.2]   # min max [m/s], slower than flat ground for stair climbing
+            lin_vel_x = [0.0, 0.0]   # min max [m/s] - forward walking disabled for this phase
             lin_vel_y = [0.0, 0.0]   # min max [m/s]
             ang_vel_yaw = [-0.75, 0.75] # min max [rad/s]
             heading = [-3.14, 3.14]
@@ -140,7 +139,7 @@ class GO2StairsCfg( LeggedRobotCfg ):
             dof_vel = -0.
             dof_acc = -2.5e-7
             base_height = -2.0
-            # feet_air_time = 1.0
+            feet_air_time = 1.0
             collision = -1.
             stumble = -1.0
             action_rate = -0.01

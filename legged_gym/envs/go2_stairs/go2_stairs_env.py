@@ -491,13 +491,12 @@ class GO2Stairs(LeggedRobot):
         if self.cfg.terrain.measure_heights:
             self.measured_heights = self._get_heights()
 
-        is_standing_still = ~self.gait_enabled
+        is_standing_still, is_rotating_in_place, _ = self._command_mode()
+
         base_height_error = torch.abs(self._stance_relative_base_height() - self.cfg.rewards.base_height_target)
         self.stand_still_height_err_sum += base_height_error * is_standing_still
         self.stand_still_height_err_count += is_standing_still.float()
 
-        is_rotating_in_place = (torch.abs(self.commands[:, 0]) < 1e-6) & (torch.abs(self.commands[:, 1]) < 1e-6) \
-            & (torch.abs(self.commands[:, 2]) > 1e-6)
         ang_vel_error = torch.abs(self.base_ang_vel[:, 2] - self.commands[:, 2])
         self.rotate_ang_vel_err_sum += ang_vel_error * is_rotating_in_place
         self.rotate_ang_vel_err_count += is_rotating_in_place.float()
@@ -507,6 +506,19 @@ class GO2Stairs(LeggedRobot):
         self.rotate_gait_match_count += is_rotating_in_place.float()
 
         return super()._post_physics_step_callback()
+
+    def _command_mode(self):
+        """ Which of the three command_proportions categories is currently active, derived
+            directly from self.commands (not stored/latched state) - shared by the monitoring
+            accumulators in _post_physics_step_callback and the mode one-hot appended to the
+            observation in compute_observations, so both always agree.
+            Returns (is_standing_still, is_rotating_in_place, is_walking), each (num_envs,) bool.
+        """
+        is_standing_still = torch.all(torch.abs(self.commands[:, :3]) < 1e-6, dim=1)
+        is_rotating_in_place = (torch.abs(self.commands[:, 0]) < 1e-6) & (torch.abs(self.commands[:, 1]) < 1e-6) \
+            & (torch.abs(self.commands[:, 2]) >= 1e-6)
+        is_walking = ~is_standing_still & ~is_rotating_in_place
+        return is_standing_still, is_rotating_in_place, is_walking
 
     def _resample_commands(self, env_ids):
         """ Draws each env's new command from one of three categories (cfg.commands.
@@ -550,6 +562,7 @@ class GO2Stairs(LeggedRobot):
         """
         cycle_time = self.cfg.rewards.cycle_time
         phase = (self.episode_length_buf * self.dt) % cycle_time / cycle_time
+        self.phase = phase  # stashed for compute_observations' sin/cos phase encoding below
         phase_offsets = torch.tensor([0.0, 0.5, 0.5, 0.0], device=self.device)
         self.leg_phase = (phase.unsqueeze(1) + phase_offsets.unsqueeze(0)) % 1.0
         # only enforce the alternating gait when a non-zero lin/ang vel command is given
@@ -568,6 +581,17 @@ class GO2Stairs(LeggedRobot):
                            * self.cfg.noise.noise_level * self.obs_scales.height_measurements)
             height_scan += (2 * torch.rand_like(height_scan) - 1) * noise_scale
 
+        # lets the policy know where it is in the trot cycle (same idea as h1_env.py's
+        # sin/cos phase) - without this it has no way to tell which foot _reward_gait_phase
+        # currently expects to be swinging vs. planted, only the indirect reward signal.
+        sin_phase = torch.sin(2 * torch.pi * self.phase).unsqueeze(1)
+        cos_phase = torch.cos(2 * torch.pi * self.phase).unsqueeze(1)
+
+        # one-hot [stand still, rotate in place, walking] - solved directly from self.commands
+        # (see _command_mode), not stored state, so it's always in sync with the actual command.
+        is_standing_still, is_rotating_in_place, is_walking = self._command_mode()
+        command_mode = torch.stack((is_standing_still, is_rotating_in_place, is_walking), dim=1).float()
+
         self.obs_buf = torch.cat((
             self.base_lin_vel * self.obs_scales.lin_vel,
             self.base_ang_vel * self.obs_scales.ang_vel,
@@ -576,6 +600,9 @@ class GO2Stairs(LeggedRobot):
             (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos,
             self.dof_vel * self.obs_scales.dof_vel,
             self.actions,
+            sin_phase,
+            cos_phase,
+            command_mode,
             height_scan,
         ), dim=-1)
         # add noise if needed (noise_scale_vec is zero-padded over the height-scan tail,
