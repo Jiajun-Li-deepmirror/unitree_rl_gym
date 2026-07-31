@@ -493,6 +493,19 @@ class GO2Stairs(LeggedRobot):
         # Penalize motion away from the default pose, but only when vx, vy AND vyaw are all zero
         return torch.sum(torch.abs(self.dof_pos - self.default_dof_pos), dim=1) * (~self.gait_enabled)
 
+    def _reward_stand_still_contact(self):
+        # Extra bonus for keeping all four feet planted while standing still (on top of the
+        # stand_still pose penalty above), so it doesn't shift weight/shuffle feet with no
+        # velocity command instead of just settling into a stable stance.
+        all_feet_contact = torch.all(self.contact_forces[:, self.feet_indices, 2] > 1., dim=1)
+        return all_feet_contact.float() * (~self.gait_enabled)
+
+    def _reward_dof_pos_deviation(self):
+        # Penalize joint angles drifting from their default pose at all times (unlike
+        # stand_still, this isn't gated on zero commands) - keeps the gait close to a natural,
+        # nominal posture instead of finding degenerate joint configurations while moving.
+        return torch.sum(torch.square(self.dof_pos - self.default_dof_pos), dim=1)
+
     def _reward_feet_edge(self):
         # Penalize feet contacting the terrain right on a stair edge (unstable foothold),
         # only once the curriculum has advanced past the easiest terrain rows.

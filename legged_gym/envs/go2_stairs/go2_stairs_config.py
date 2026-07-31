@@ -110,8 +110,8 @@ class GO2StairsCfg( LeggedRobotCfg ):
     class rewards( LeggedRobotCfg.rewards ):
         soft_dof_pos_limit = 0.9
         base_height_target = 0.25
-        edge_height_threshold = 0.03 # [m], min height jump between neighboring terrain cells to count as a stair edge
 
+        edge_height_threshold = 0.03 # [m], min height jump between neighboring terrain cells to count as a stair edge
         cycle_time = 0.5 # trot gait period [s]
         class scales:
             termination = -0.0
@@ -124,8 +124,8 @@ class GO2StairsCfg( LeggedRobotCfg ):
             torques = -0.0002
             dof_vel = -0.
             dof_acc = -2.5e-7
-            # base_height = -2.0
-            base_height = -0.
+            base_height = -2.0
+            # base_height = -0.
             feet_air_time = 1.0
             collision = -1.
             feet_stumble = -0.0
@@ -136,8 +136,14 @@ class GO2StairsCfg( LeggedRobotCfg ):
 
             # gait_phase = 0.18
             gait_phase = 0.
+            # feet_edge = -1.0
             feet_edge = -0.0
+            # hip_pos = -1.0
             hip_pos = -0.0
+            # stand_still_contact = 0.2
+            stand_still_contact = 0.0
+            # dof_pos_deviation = -0.1
+            dof_pos_deviation = -0.
 
 class GO2StairsCfgPPO( LeggedRobotCfgPPO ):
     # trains the height-scan encoder jointly with the policy (see legged_gym/algorithms/)
@@ -146,7 +152,7 @@ class GO2StairsCfgPPO( LeggedRobotCfgPPO ):
         entropy_coef = 0.01
     class runner( LeggedRobotCfgPPO.runner ):
         policy_class_name = 'ActorCriticHeightEncoder'
-        run_name = ''
+        run_name = 'mlp_ori_height'
         experiment_name = 'stairs_go2'
         max_iterations = 3000
         save_interval = 100
