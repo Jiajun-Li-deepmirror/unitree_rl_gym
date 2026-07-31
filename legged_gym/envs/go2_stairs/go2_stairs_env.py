@@ -238,6 +238,17 @@ class GO2Stairs(LeggedRobot):
         self.rotate_ang_vel_err_sum[env_ids] = 0.
         self.rotate_ang_vel_err_count[env_ids] = 0.
 
+        # fraction (0-1) of feet matching the expected trot stance/swing phase, but only
+        # counted during rotate-in-place steps - isolates "does gait_phase actually hold up
+        # during pure rotation" from the aggregate Episode/rew_gait_phase, which mixes in
+        # forward walking too and can look fine even if rotation-in-place never gaits at all.
+        rotate_gait_mask = self.rotate_gait_match_count[env_ids] > 0
+        mean_match = self.rotate_gait_match_sum[env_ids] / self.rotate_gait_match_count[env_ids].clamp(min=1)
+        self.extras["episode"]["rotate_in_place_gait_match_frac"] = (
+            torch.mean(mean_match[rotate_gait_mask]) if rotate_gait_mask.any() else torch.zeros((), device=self.device))
+        self.rotate_gait_match_sum[env_ids] = 0.
+        self.rotate_gait_match_count[env_ids] = 0.
+
     def _update_terrain_curriculum(self, env_ids):
         """ Moves each env to a harder terrain row if it walked far enough this episode (past
             half the terrain tile length), or an easier one if it barely covered the ground its
@@ -467,6 +478,8 @@ class GO2Stairs(LeggedRobot):
         self.stand_still_height_err_count = torch.zeros(self.num_envs, device=self.device)
         self.rotate_ang_vel_err_sum = torch.zeros(self.num_envs, device=self.device)
         self.rotate_ang_vel_err_count = torch.zeros(self.num_envs, device=self.device)
+        self.rotate_gait_match_sum = torch.zeros(self.num_envs, device=self.device)
+        self.rotate_gait_match_count = torch.zeros(self.num_envs, device=self.device)
 
     def _post_physics_step_callback(self):
         self._update_gait_phase()
@@ -488,6 +501,10 @@ class GO2Stairs(LeggedRobot):
         ang_vel_error = torch.abs(self.base_ang_vel[:, 2] - self.commands[:, 2])
         self.rotate_ang_vel_err_sum += ang_vel_error * is_rotating_in_place
         self.rotate_ang_vel_err_count += is_rotating_in_place.float()
+
+        gait_match_frac = self._gait_phase_match_count() / len(self.feet_indices)
+        self.rotate_gait_match_sum += gait_match_frac * is_rotating_in_place
+        self.rotate_gait_match_count += is_rotating_in_place.float()
 
         return super()._post_physics_step_callback()
 
@@ -581,14 +598,20 @@ class GO2Stairs(LeggedRobot):
         # depend on the height-scan implementation.
         return torch.square(self._stance_relative_base_height() - self.cfg.rewards.base_height_target)
 
-    def _reward_gait_phase(self):
-        # reward feet contact state matching the expected stance/swing of the trot phase
+    def _gait_phase_match_count(self):
+        # how many feet (0..len(feet_indices)) currently have their contact state matching the
+        # expected trot stance/swing phase - shared by _reward_gait_phase and the
+        # rotate_in_place_gait_match_frac monitoring metric below.
         res = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         for i in range(len(self.feet_indices)):
             is_stance = self.leg_phase[:, i] < 0.55
             contact = self.contact_forces[:, self.feet_indices[i], 2] > 1.
             res += ~(contact ^ is_stance)
-        return res * self.gait_enabled
+        return res
+
+    def _reward_gait_phase(self):
+        # reward feet contact state matching the expected stance/swing of the trot phase
+        return self._gait_phase_match_count() * self.gait_enabled
 
     def _reward_feet_swing_height(self):
         # Penalize swing (non-contact) feet for missing cfg.rewards.feet_swing_height_target
