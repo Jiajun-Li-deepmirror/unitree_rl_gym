@@ -9,7 +9,7 @@ from isaacgym import gymapi, gymtorch, gymutil, terrain_utils
 from isaacgym.torch_utils import torch_rand_float, quat_from_euler_xyz
 
 from legged_gym.envs.base.legged_robot import LeggedRobot
-from legged_gym.utils.terrain import Terrain
+from legged_gym.utils.isaacgym_utils import get_euler_xyz as get_euler_xyz_in_tensor
 from legged_gym.utils.math import quat_apply_yaw
 
 
@@ -26,11 +26,10 @@ class GO2Stairs(LeggedRobot):
             self._create_trimesh()
         else:
             mesh_type = self.cfg.terrain.mesh_type
-            if mesh_type in ['heightfield', 'trimesh']:
-                self.terrain = Terrain(self.cfg.terrain, self.num_envs)
             if mesh_type == 'plane':
                 self._create_ground_plane()
             elif mesh_type == 'trimesh':
+                self.terrain = self._build_wave_stairs_terrain()
                 self._create_trimesh()
             else:
                 raise ValueError(f"go2_stairs only supports terrain.mesh_type in ['plane', 'trimesh'], got '{mesh_type}'")
@@ -103,6 +102,92 @@ class GO2Stairs(LeggedRobot):
         spawn_x = (run_up_px - spawn_margin_px) * horizontal_scale
         spawn_y = (flight_width_px / 2) * horizontal_scale
         terrain.env_origins = np.array([[[spawn_x, spawn_y, 0.0]]])  # (num_rows=1, num_cols=1, 3)
+        return terrain
+
+    def _build_wave_stairs_terrain(self):
+        """ Curriculum-compatible grid of wave-shaped staircases: num_rows ridges chained
+            back-to-back along x per column. Each ridge is a two-sided staircase - flat trough,
+            climbs num_steps_per_side in +x, a short peak platform, then descends the same
+            num_steps_per_side back to the SAME baseline (height 0) the trough sits at. Row
+            picks difficulty via the same step_height formula as terrain.py's make_terrain
+            (0.05 + 0.278*difficulty), for continuity with what was already being trained on.
+
+            Every ridge starts and ends at height 0, so chaining them leaves no cliff at the
+            difficulty-row boundary the way a flat top platform dropping straight back to 0
+            would - just progressively taller waves, like a 1-axis pyramid (climbs toward a
+            ridge line, not radially toward a point) repeated with growing amplitude. First half
+            of columns are "hill" ridges (climb then descend, like an above-ground pyramid);
+            second half are "pit" ridges (descend then climb back up, like a dug-out pyramid) -
+            mirrors terrain.py make_terrain's up/down pyramid_stairs_terrain split.
+
+            Doesn't reproduce terrain_proportions' other categories (slope/rough/discrete) -
+            this is a dedicated stairs-only replacement, matching go2_stairs' own
+            terrain_proportions being 100% stairs anyway.
+        """
+        cfg = self.cfg.terrain
+        wave_cfg = cfg.wave_stairs
+        horizontal_scale = cfg.horizontal_scale
+        vertical_scale = cfg.vertical_scale
+        num_rows, num_cols = cfg.num_rows, cfg.num_cols
+        border_px = round(cfg.border_size / horizontal_scale)
+
+        tile_wid_px = round(cfg.terrain_width / horizontal_scale)
+        step_width_px = max(round(wave_cfg.step_width / horizontal_scale), 1)
+        lead_in_px = max(round(wave_cfg.lead_in_size / horizontal_scale), 1)
+        peak_platform_px = max(round(wave_cfg.peak_platform_size / horizontal_scale), 1)
+        num_steps = wave_cfg.num_steps_per_side
+        ridge_len_px = lead_in_px + 2 * num_steps * step_width_px + peak_platform_px
+
+        tot_rows = num_rows * ridge_len_px + 2 * border_px
+        tot_cols = num_cols * tile_wid_px + 2 * border_px
+        height_field_raw = np.zeros((tot_rows, tot_cols), dtype=np.int16)
+        env_origins = np.zeros((num_rows, num_cols, 3), dtype=np.float32)
+
+        ridge_len = ridge_len_px * horizontal_scale
+        # spawn a bit into the flat trough, not right at the ridge's own near boundary
+        spawn_local_px = min(max(round(0.5 / horizontal_scale), 1), lead_in_px)
+
+        for j in range(num_cols):
+            sign = 1 if j < num_cols / 2 else -1  # +1: hill (up then down), -1: pit (down then up)
+            col_y0 = border_px + j * tile_wid_px
+            for i in range(num_rows):
+                difficulty = i / num_rows
+                step_height_px = max(round((0.05 + 0.278 * difficulty) / vertical_scale), 1)
+
+                ridge_x0 = border_px + i * ridge_len_px
+                x = ridge_x0 + lead_in_px
+                height = 0
+                for _ in range(num_steps):
+                    x_end = x + step_width_px
+                    height += sign * step_height_px
+                    height_field_raw[x:x_end, col_y0:col_y0 + tile_wid_px] = height
+                    x = x_end
+                x_end = x + peak_platform_px
+                height_field_raw[x:x_end, col_y0:col_y0 + tile_wid_px] = height
+                x = x_end
+                for _ in range(num_steps):
+                    x_end = x + step_width_px
+                    height -= sign * step_height_px
+                    height_field_raw[x:x_end, col_y0:col_y0 + tile_wid_px] = height
+                    x = x_end
+                # height is back to 0 here, exactly matching the next ridge's own trough
+
+                env_origins[i, j, 0] = i * ridge_len + spawn_local_px * horizontal_scale
+                env_origins[i, j, 1] = (j + 0.5) * cfg.terrain_width
+                env_origins[i, j, 2] = 0.0  # flat trough, untouched by the loop above
+
+        vertices, triangles = terrain_utils.convert_heightfield_to_trimesh(
+            height_field_raw, horizontal_scale, vertical_scale, cfg.slope_treshold)
+
+        terrain = types.SimpleNamespace()
+        terrain.cfg = cfg
+        terrain.height_field_raw = height_field_raw
+        terrain.heightsamples = height_field_raw
+        terrain.tot_rows, terrain.tot_cols = tot_rows, tot_cols
+        terrain.vertices, terrain.triangles = vertices, triangles
+        terrain.env_origins = env_origins
+        terrain.env_length = ridge_len  # so _update_terrain_curriculum's move_up threshold (half a ridge) scales with the new tile size
+        terrain.env_width = cfg.terrain_width
         return terrain
 
     def _create_trimesh(self):
@@ -183,11 +268,10 @@ class GO2Stairs(LeggedRobot):
         self.env_origins[:] = self._terrain_spawn_origins(self.terrain_levels, self.terrain_types)
 
     def _terrain_spawn_origins(self, terrain_levels, terrain_types):
-        """ Every env of a given (terrain_level, terrain_type) spawns at that tile's center
-            (terrain_origins, straight from Terrain.add_terrain_to_map), shifted +0.5m in x.
+        """ Every env of a given (terrain_level, terrain_type) spawns at that ridge's own spawn
+            point (terrain_origins, straight from GO2Stairs._build_wave_stairs_terrain).
         """
         origins = self.terrain_origins[terrain_levels, terrain_types].clone()
-        origins[:, 0] += 0.5
         return origins
 
     def reset_idx(self, env_ids):
@@ -231,36 +315,18 @@ class GO2Stairs(LeggedRobot):
         self.rotate_gait_match_sum[env_ids] = 0.
         self.rotate_gait_match_count[env_ids] = 0.
 
-    def _expected_climb_height(self, terrain_levels):
-        # total height crossing every ring of a pyramid-stairs tile at this difficulty -
-        # step_width/platform_size must match terrain.py make_terrain()'s pyramid_stairs_terrain call
-        step_width = 0.31
-        platform_size = 3.0
-        num_rings = max(int((self.terrain.env_length - platform_size) / (2 * step_width)), 0)
-        difficulty = terrain_levels.float() / self.cfg.terrain.num_rows
-        step_height = 0.05 + 0.278 * difficulty  # must match terrain.py make_terrain()
-        return num_rings * step_height
-
     def _update_terrain_curriculum(self, env_ids):
-        """ Moves each env to a harder/easier terrain row based on BOTH forward (+x) progress
-            from its spawn point (vs. half the tile length) AND actual height climbed (vs. half
-            the tile's total climbable height) - x alone can't tell a real climb from just
-            drifting forward. Envs that never sampled a walking command this episode are excluded.
+        """ Moves each env to a harder/easier terrain row based on forward (+x) progress from
+            its spawn point vs. half the ridge length (terrain.env_length). Envs that never
+            sampled a (heading-aligned) walking command this episode are excluded - see
+            had_walking_command.
         """
         if not self.init_done:
             return
         forward_distance = self.root_states[env_ids, 0] - self.env_origins[env_ids, 0]
-        height_change = torch.abs(self.root_states[env_ids, 2] - self.env_origins[env_ids, 2])
-        expected_climb = self._expected_climb_height(self.terrain_levels[env_ids])
         had_walking_command = self.had_walking_command[env_ids]
-
-        made_forward_progress = forward_distance > self.terrain.env_length / 2
-        made_height_progress = height_change > expected_climb / 2
-        move_up = made_forward_progress & made_height_progress & had_walking_command
-
-        lacked_forward_progress = forward_distance < torch.norm(self.commands[env_ids, :2], dim=1) * self.max_episode_length_s * 0.5
-        lacked_height_progress = height_change < expected_climb / 2
-        move_down = lacked_forward_progress & lacked_height_progress & ~move_up & had_walking_command
+        move_up = (forward_distance > self.terrain.env_length / 2) & had_walking_command
+        move_down = (forward_distance < torch.norm(self.commands[env_ids, :2], dim=1) * self.max_episode_length_s * 0.5) & ~move_up & had_walking_command
 
         self.terrain_levels[env_ids] += 1 * move_up - 1 * move_down
         self.terrain_levels[env_ids] = torch.where(
@@ -534,9 +600,10 @@ class GO2Stairs(LeggedRobot):
             self.commands[normal_ids, 0] *= torch.abs(self.commands[normal_ids, 0]) > 0.1
             self.commands[normal_ids, 2] *= torch.abs(self.commands[normal_ids, 2]) > 0.1
 
-        # record if this resample landed on "walking" (post dead-zone, via _command_mode)
+        yaw = get_euler_xyz_in_tensor(self.root_states[:, 3:7])[:, 2]
+        facing_climb_direction = torch.abs(yaw) < 1.0
         _, _, is_walking = self._command_mode()
-        self.had_walking_command[env_ids] |= is_walking[env_ids]
+        self.had_walking_command[env_ids] |= is_walking[env_ids] & facing_climb_direction[env_ids]
 
     def _update_gait_phase(self):
         """ Trotting gait phase for the diagonal leg pairs (FL+RR / FR+RL).
@@ -631,7 +698,9 @@ class GO2Stairs(LeggedRobot):
         clearance = self.feet_pos[:, :, 2] - terrain_height
 
         contact = self.contact_forces[:, self.feet_indices, 2] > 1.
-        swing_error = torch.square(clearance - self.cfg.rewards.feet_swing_height_target) * (~contact)
+        # only penalize falling short of the target - clearing higher (e.g. a tall stair riser) is fine
+        shortfall = torch.clamp(self.cfg.rewards.feet_swing_height_target - clearance, min=0.)
+        swing_error = torch.square(shortfall) * (~contact)
         return torch.sum(swing_error, dim=1) * self.gait_enabled
 
     def _reward_stand_still(self):

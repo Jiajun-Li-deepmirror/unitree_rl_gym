@@ -37,6 +37,11 @@ class GO2StairsCfg( LeggedRobotCfg ):
         mesh_type = 'trimesh'
         curriculum = True
         measure_heights = True
+        # convert_heightfield_to_trimesh only makes a step riser vertical when its height jump
+        # exceeds slope_treshold*horizontal_scale (=0.075m at the base default 0.75); the easiest
+        # wave_stairs row's 0.05m step falls under that, so its riser stayed a sloped face.
+        # Lowered so even the smallest step (0.05m) clears the threshold (0.3*0.1=0.03m).
+        slope_treshold = 0.3
         # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete]
         terrain_proportions = [0.0, 0.0, 0.5, 0.5, 0.0]
 
@@ -49,6 +54,12 @@ class GO2StairsCfg( LeggedRobotCfg ):
             flight_width = 2.0   # [m] width of each flight
             platform_size = 1.0  # [m] flat spawn run-up / mid-turn landing length
             top_platform_size = 1.5  # [m] flat landing at the top of flight 2
+
+        class wave_stairs:
+            num_steps_per_side = 8
+            step_width = 0.31        # [m] depth of each step
+            lead_in_size = 1.0       # [m] flat trough before the climb starts (also the descent's landing)
+            peak_platform_size = 0.5  # [m] flat platform at each ridge's peak
 
     class commands( LeggedRobotCfg.commands ):
         curriculum = False
