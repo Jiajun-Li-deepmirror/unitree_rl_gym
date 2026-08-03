@@ -9,7 +9,6 @@ from isaacgym import gymapi, gymtorch, gymutil, terrain_utils
 from isaacgym.torch_utils import torch_rand_float, quat_apply, quat_from_euler_xyz
 
 from legged_gym.envs.base.legged_robot import LeggedRobot
-from legged_gym.utils.isaacgym_utils import get_euler_xyz as get_euler_xyz_in_tensor
 from legged_gym.utils.math import quat_apply_yaw, wrap_to_pi
 
 
@@ -344,7 +343,7 @@ class GO2Stairs(LeggedRobot):
             length (terrain.env_length), or an easier one if it didn't even clear the first stair
             riser (height change < one step_height) - much more lenient than requiring full
             distance, so a slow-but-real attempt at a harder level isn't instantly bounced back
-            down. Envs that never sampled a (heading-aligned) walking command are excluded.
+            down. Envs that never sampled a walking command this episode are excluded.
         """
         if not self.init_done:
             return
@@ -610,13 +609,18 @@ class GO2Stairs(LeggedRobot):
         return is_standing_still, is_rotating_in_place, is_walking
 
     def _resample_commands(self, env_ids):
-        """ Draws each env's command from command_proportions: stand still, rotate in place
+        """ Draws each env's command from command_proportions (switching to command_curriculum's
+            late_proportions once past switch_iteration, see there): stand still, rotate in place
             (vyaw floored so it never decays to ~0), or normal walking. Walking samples a heading
             target (commands[:,3], centered on the climb direction) instead of vyaw directly -
             _post_physics_step_callback turns that into vyaw every step, base-class style, but
             scoped to walking envs only so stand-still/rotate-in-place keep their own direct vyaw.
         """
-        proportions = torch.cumsum(torch.tensor(self.cfg.commands.command_proportions, device=self.device), dim=0)
+        curr_cfg = self.cfg.commands.command_curriculum
+        current_iteration = self.common_step_counter // curr_cfg.num_steps_per_env
+        active_proportions = (curr_cfg.late_proportions if current_iteration >= curr_cfg.switch_iteration
+                               else self.cfg.commands.command_proportions)
+        proportions = torch.cumsum(torch.tensor(active_proportions, device=self.device), dim=0)
         choice = torch.rand(len(env_ids), device=self.device) * proportions[-1]
         stand_ids = env_ids[choice < proportions[0]]
         rotate_ids = env_ids[(choice >= proportions[0]) & (choice < proportions[1])]
@@ -643,10 +647,12 @@ class GO2Stairs(LeggedRobot):
 
             self.commands[normal_ids, 0] *= torch.abs(self.commands[normal_ids, 0]) > 0.1
 
-        yaw = get_euler_xyz_in_tensor(self.root_states[:, 3:7])[:, 2]
-        facing_climb_direction = torch.abs(yaw) < 0.5
+        # heading (not a one-shot vyaw) drives walking now, so _post_physics_step_callback keeps
+        # steering toward the climb direction every step regardless of the heading at sample
+        # time - no need to also require "already facing the right way" here, just that a
+        # walking command was sampled at all this episode.
         _, _, is_walking = self._command_mode()
-        self.had_walking_command[env_ids] |= is_walking[env_ids] & facing_climb_direction[env_ids]
+        self.had_walking_command[env_ids] |= is_walking[env_ids]
 
     def _update_gait_phase(self):
         """ Trotting gait phase for the diagonal leg pairs (FL+RR / FR+RL).
@@ -729,7 +735,9 @@ class GO2Stairs(LeggedRobot):
         return res
 
     def _reward_gait_phase(self):
-        return self._gait_phase_match_count() * self.gait_enabled
+        # only rewarded while rotating in place (not walking, so the stair-climbing gait can adapt freely)
+        _, is_rotating_in_place, _ = self._command_mode()
+        return self._gait_phase_match_count() * is_rotating_in_place
 
     def _reward_feet_swing_height(self):
         # penalize swing feet missing the target clearance above local terrain, while gaited
@@ -743,7 +751,9 @@ class GO2Stairs(LeggedRobot):
         # only penalize falling short of the target - clearing higher (e.g. a tall stair riser) is fine
         shortfall = torch.clamp(self.cfg.rewards.feet_swing_height_target - clearance, min=0.)
         swing_error = torch.square(shortfall) * (~contact)
-        return torch.sum(swing_error, dim=1) * self.gait_enabled
+        # only enforced while rotating in place (not walking, so the stair-climbing gait can adapt freely)
+        _, is_rotating_in_place, _ = self._command_mode()
+        return torch.sum(swing_error, dim=1) * is_rotating_in_place
 
     def _reward_stand_still(self):
         # penalize motion away from the default pose, but only when vx, vy AND vyaw are all zero

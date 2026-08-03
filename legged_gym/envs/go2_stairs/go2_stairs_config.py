@@ -67,13 +67,20 @@ class GO2StairsCfg( LeggedRobotCfg ):
         # step (that would override stand-still/rotate-in-place's own direct vyaw too) - GO2Stairs
         # implements the same tracking itself in _post_physics_step_callback, scoped to walking envs
         heading_command = False
-        command_proportions = [0.1, 0.1, 0.8]
+        # mostly-walking early on, so stairs-climbing is the dominant skill being trained instead
+        # of being diluted by gait_phase/feet_swing_height rewards firing during stand-still/
+        # rotate-in-place - see command_curriculum below for the later switch.
+        command_proportions = [0.05, 0.05, 0.9]
         rotate_in_place_ang_vel_min = 0.1 # [rad/s], floor on |vyaw| so "rotate" never degrades to ~0
+        class command_curriculum:
+            switch_iteration = 8000
+            num_steps_per_env = 24
+            late_proportions = [0.2, 0.2, 0.6]
         class ranges:
             lin_vel_x = [0.0, 1.2]   # min max [m/s] - forward walking disabled for this phase
             lin_vel_y = [0.0, 0.0]   # min max [m/s]
             ang_vel_yaw = [-0.75, 0.75] # min max [rad/s] - also the clip bound for heading-derived vyaw
-            heading = [-0.5, 0.5] # centered on the climb direction (+x) - matches _resample_commands' facing_climb_direction tolerance
+            heading = [-0.5, 0.5] # centered on the climb direction (+x)
 
     class height_scan:
         # grid shape - see the module-level MEASURED_POINTS_X/Y comment above to edit it
@@ -139,15 +146,15 @@ class GO2StairsCfg( LeggedRobotCfg ):
             dof_acc = -2.5e-7
             base_height = -2.0
             feet_air_time = 1.0
-            collision = -0.5
-            stumble = -0.5
+            collision = -1.0
+            stumble = -1.0
             action_rate = -0.01
             stand_still = -0.5
             dof_pos_limits = -10.0
 
             gait_phase = .4
             feet_swing_height = -10.0
-            feet_edge = -0.5
+            feet_edge = -1.0
             hip_pos = -1.0
             # stand_still_contact = 0.2
             # dof_pos_deviation = -0.1
@@ -161,5 +168,5 @@ class GO2StairsCfgPPO( LeggedRobotCfgPPO ):
         policy_class_name = 'ActorCriticHeightEncoder'
         run_name = ''
         experiment_name = 'stairs_go2'
-        max_iterations = 3000
+        max_iterations = 10000
         save_interval = 100
