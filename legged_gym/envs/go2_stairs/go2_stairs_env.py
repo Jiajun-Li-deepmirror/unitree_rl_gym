@@ -6,11 +6,11 @@ import numpy as np
 import torch
 
 from isaacgym import gymapi, gymtorch, gymutil, terrain_utils
-from isaacgym.torch_utils import torch_rand_float
+from isaacgym.torch_utils import torch_rand_float, quat_apply, quat_from_euler_xyz
 
 from legged_gym.envs.base.legged_robot import LeggedRobot
 from legged_gym.utils.isaacgym_utils import get_euler_xyz as get_euler_xyz_in_tensor
-from legged_gym.utils.math import quat_apply_yaw
+from legged_gym.utils.math import quat_apply_yaw, wrap_to_pi
 
 
 class GO2Stairs(LeggedRobot):
@@ -225,7 +225,11 @@ class GO2Stairs(LeggedRobot):
             # scattering randomly within a 2m box around it
             self.root_states[env_ids] = self.base_init_state
             self.root_states[env_ids, :3] += self.env_origins[env_ids]
-            # spawn yaw stays at cfg.init_state.rot's default (0) - no randomization
+            # full-range random spawn yaw - heading-command tracking (see _post_physics_step_callback)
+            # turns walking envs back toward the climb direction regardless of spawn orientation
+            yaw = torch_rand_float(-math.pi, math.pi, (len(env_ids), 1), device=self.device).squeeze(1)
+            zeros = torch.zeros_like(yaw)
+            self.root_states[env_ids, 3:7] = quat_from_euler_xyz(zeros, zeros, yaw)
             # zero spawn velocity (base class randomizes +-0.5) so resets restart cleanly at rest
             self.root_states[env_ids, 7:13] = 0.
             env_ids_int32 = env_ids.to(dtype=torch.int32)
@@ -537,7 +541,21 @@ class GO2Stairs(LeggedRobot):
         if self.cfg.terrain.measure_heights:
             self.measured_heights = self._get_heights()
 
-        is_standing_still, is_rotating_in_place, _ = self._command_mode()
+        # resamples commands (may set a fresh heading target for envs just entering "walking")
+        result = super()._post_physics_step_callback()
+
+        # heading-command tracking, walking envs only - turns the sampled heading target
+        # (commands[:,3]) into vyaw (commands[:,2]) every step, base-class style, but scoped so
+        # stand-still/rotate-in-place envs keep their own directly-sampled vyaw untouched
+        is_standing_still, is_rotating_in_place, is_walking = self._command_mode()
+        if torch.any(is_walking):
+            forward = quat_apply(self.base_quat, self.forward_vec)
+            heading = torch.atan2(forward[:, 1], forward[:, 0])
+            target_ang_vel = torch.clip(
+                0.5 * wrap_to_pi(self.commands[:, 3] - heading),
+                self.command_ranges["ang_vel_yaw"][0], self.command_ranges["ang_vel_yaw"][1],
+            )
+            self.commands[is_walking, 2] = target_ang_vel[is_walking]
 
         base_height_error = torch.abs(self._stance_relative_base_height() - self.cfg.rewards.base_height_target)
         self.stand_still_height_err_sum += base_height_error * is_standing_still
@@ -551,7 +569,7 @@ class GO2Stairs(LeggedRobot):
         self.rotate_gait_match_sum += gait_match_frac * is_rotating_in_place
         self.rotate_gait_match_count += is_rotating_in_place.float()
 
-        return super()._post_physics_step_callback()
+        return result
 
     def _command_mode(self):
         """ Which command_proportions category is active, derived fresh from self.commands - shared
@@ -566,8 +584,10 @@ class GO2Stairs(LeggedRobot):
 
     def _resample_commands(self, env_ids):
         """ Draws each env's command from command_proportions: stand still, rotate in place
-            (vyaw floored so it never decays to ~0), or normal sampling with the same 0.1 dead
-            zone as the base class's combined-norm check.
+            (vyaw floored so it never decays to ~0), or normal walking. Walking samples a heading
+            target (commands[:,3], centered on the climb direction) instead of vyaw directly -
+            _post_physics_step_callback turns that into vyaw every step, base-class style, but
+            scoped to walking envs only so stand-still/rotate-in-place keep their own direct vyaw.
         """
         proportions = torch.cumsum(torch.tensor(self.cfg.commands.command_proportions, device=self.device), dim=0)
         choice = torch.rand(len(env_ids), device=self.device) * proportions[-1]
@@ -591,11 +611,10 @@ class GO2Stairs(LeggedRobot):
                 self.command_ranges["lin_vel_x"][0], self.command_ranges["lin_vel_x"][1], (len(normal_ids), 1), device=self.device).squeeze(1)
             self.commands[normal_ids, 1] = torch_rand_float(
                 self.command_ranges["lin_vel_y"][0], self.command_ranges["lin_vel_y"][1], (len(normal_ids), 1), device=self.device).squeeze(1)
-            self.commands[normal_ids, 2] = torch_rand_float(
-                self.command_ranges["ang_vel_yaw"][0], self.command_ranges["ang_vel_yaw"][1], (len(normal_ids), 1), device=self.device).squeeze(1)
+            self.commands[normal_ids, 3] = torch_rand_float(
+                self.command_ranges["heading"][0], self.command_ranges["heading"][1], (len(normal_ids), 1), device=self.device).squeeze(1)
 
             self.commands[normal_ids, 0] *= torch.abs(self.commands[normal_ids, 0]) > 0.1
-            self.commands[normal_ids, 2] *= torch.abs(self.commands[normal_ids, 2]) > 0.1
 
         yaw = get_euler_xyz_in_tensor(self.root_states[:, 3:7])[:, 2]
         facing_climb_direction = torch.abs(yaw) < 0.5

@@ -63,14 +63,17 @@ class GO2StairsCfg( LeggedRobotCfg ):
         max_curriculum = 1.
         num_commands = 4
         resampling_time = 10. # time before commands are changed [s]
+        # kept False so the base class doesn't apply heading->vyaw tracking to ALL envs every
+        # step (that would override stand-still/rotate-in-place's own direct vyaw too) - GO2Stairs
+        # implements the same tracking itself in _post_physics_step_callback, scoped to walking envs
         heading_command = False
         command_proportions = [0.1, 0.1, 0.8]
         rotate_in_place_ang_vel_min = 0.1 # [rad/s], floor on |vyaw| so "rotate" never degrades to ~0
         class ranges:
             lin_vel_x = [0.0, 1.2]   # min max [m/s] - forward walking disabled for this phase
             lin_vel_y = [0.0, 0.0]   # min max [m/s]
-            ang_vel_yaw = [-0.75, 0.75] # min max [rad/s]
-            heading = [-3.14, 3.14]
+            ang_vel_yaw = [-0.75, 0.75] # min max [rad/s] - also the clip bound for heading-derived vyaw
+            heading = [-0.5, 0.5] # centered on the climb direction (+x) - matches _resample_commands' facing_climb_direction tolerance
 
     class height_scan:
         # grid shape - see the module-level MEASURED_POINTS_X/Y comment above to edit it
