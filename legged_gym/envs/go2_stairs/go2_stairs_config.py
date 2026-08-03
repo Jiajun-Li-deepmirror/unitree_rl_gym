@@ -2,18 +2,10 @@ from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobot
 
 HEIGHT_LATENT_DIM = 32  # dim of the height-scan encoder's output latent (see height_encoder below)
 
-# Shape of the height-scan grid, in the base frame: x is forward(+)/backward(-), y is
-# left(+)/right(-). Edit these two lists to reshape the scan - e.g. drop the negative entries
-# in MEASURED_POINTS_X to stop sampling points behind the robot. Kept as module constants
-# (mirrored onto GO2StairsCfg.height_scan below) rather than only inside the class, so
-# NUM_HEIGHT_POINTS can be computed here before GO2StairsCfg itself is defined - edit these,
-# not the copies under `class height_scan`, or num_observations will fall out of sync.
+# height-scan grid, in base frame (x fwd/back, y left/right) - edit these two lists to reshape it
 MEASURED_POINTS_X = [0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8]  # forward-only, same 17 points, 0.05 spacing
 MEASURED_POINTS_Y = [-0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5]
-# proprio (48, same layout as go2) + raw height-scan points. The height-scan encoder MLP now lives
-# inside ActorCriticHeightEncoder (see legged_gym/algorithms/height_actor_critic.py) so it's trained
-# end-to-end by PPO, instead of being a fixed/untrained encoder baked into the env observation - so
-# the env has to expose the *raw* height scan here, not an already-encoded latent.
+# proprio(48) + raw height-scan points; encoder lives in ActorCriticHeightEncoder, not here
 NUM_HEIGHT_POINTS = len(MEASURED_POINTS_X) * len(MEASURED_POINTS_Y)
 
 class GO2StairsCfg( LeggedRobotCfg ):
@@ -48,14 +40,12 @@ class GO2StairsCfg( LeggedRobotCfg ):
         # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete]
         terrain_proportions = [0.0, 0.0, 0.5, 0.5, 0.0]
 
-        # if True, replaces the curriculum terrain grid with a single continuously-ascending
-        # U-shaped (switchback) staircase - one flight up, a landing that turns around, a
-        # second flight up. Used by play_keyboard.py for a one-robot showcase run.
+        # single continuously-ascending U-shaped staircase, used by play_keyboard.py
         u_shape_playground = False
         class u_shape:
             num_steps = 12       # steps per flight
             step_width = 0.3     # [m] depth of each step
-            step_height = 0.12   # [m] rise of each step
+            step_height = 0.2   # [m] rise of each step
             flight_width = 2.0   # [m] width of each flight
             platform_size = 1.0  # [m] flat spawn run-up / mid-turn landing length
             top_platform_size = 1.5  # [m] flat landing at the top of flight 2
@@ -69,14 +59,13 @@ class GO2StairsCfg( LeggedRobotCfg ):
         command_proportions = [0.2, 0.2, 0.6]
         rotate_in_place_ang_vel_min = 0.1 # [rad/s], floor on |vyaw| so "rotate" never degrades to ~0
         class ranges:
-            lin_vel_x = [0.0, 0.0]   # min max [m/s] - forward walking disabled for this phase
+            lin_vel_x = [0.0, 1.2]   # min max [m/s] - forward walking disabled for this phase
             lin_vel_y = [0.0, 0.0]   # min max [m/s]
             ang_vel_yaw = [-0.75, 0.75] # min max [rad/s]
             heading = [-3.14, 3.14]
 
     class height_scan:
-        # Shape of the height-scan grid - see the module-level MEASURED_POINTS_X/Y comment
-        # above for how to edit this (e.g. to drop the points behind the robot).
+        # grid shape - see the module-level MEASURED_POINTS_X/Y comment above to edit it
         measured_points_x = MEASURED_POINTS_X
         measured_points_y = MEASURED_POINTS_Y
 
@@ -94,8 +83,7 @@ class GO2StairsCfg( LeggedRobotCfg ):
         fps = 15
         # near_plane = 0.19  # [m] Min-Z at max resolution
         near_plane = 1e-5
-        # not in the datasheet (only "<2% accuracy @ 3m" is specced) - pick a sensible usable
-        # range and tune later against the real sensor if needed
+        # not in the datasheet (only "<2% accuracy @ 3m" is specced) - pick a sensible default
         far_plane = 5.0  # [m]
         horizontal_fov = 87.0  # [deg] not in the datasheet either - typical for this class of stereo module
         mount_body = "Head_lower"  # front/chin mount point already present on the go2 URDF
@@ -148,8 +136,8 @@ class GO2StairsCfg( LeggedRobotCfg ):
 
             gait_phase = .4
             feet_swing_height = -10.0
-            # feet_edge = -1.0
-            # hip_pos = -1.0
+            feet_edge = -1.0
+            hip_pos = -1.0
             # stand_still_contact = 0.2
             # dof_pos_deviation = -0.1
 
@@ -160,7 +148,7 @@ class GO2StairsCfgPPO( LeggedRobotCfgPPO ):
         entropy_coef = 0.01
     class runner( LeggedRobotCfgPPO.runner ):
         policy_class_name = 'ActorCriticHeightEncoder'
-        run_name = 'mlp_ori_height'
+        run_name = ''
         experiment_name = 'stairs_go2'
         max_iterations = 3000
         save_interval = 100

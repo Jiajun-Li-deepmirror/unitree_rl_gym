@@ -13,11 +13,11 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 
-# vx/vy/vyaw step applied on every key press, and the camera offset (world
-# frame, relative to the robot) used while the follow-above camera is active.
+# vx/vy/vyaw step per key press, and the camera offset while the follow-above camera is active
 VX_STEP = 0.1
 VY_STEP = 0.1
 VYAW_STEP = 0.1
+VEL_DEADZONE = 0.1  # matches GO2Stairs._resample_commands' vx/vyaw dead zone
 CAMERA_OFFSET = np.array([-1.0, 0.0, 1.5])  # behind (-x) and above (+z) the robot
 
 # live vx/vyaw command-vs-actual strip chart (scrolling window, like an ECG trace)
@@ -59,9 +59,7 @@ def play(args):
     # commands are driven from the keyboard instead of being randomly resampled
     env_cfg.commands.heading_command = False
     env_cfg.commands.resampling_time = 1e9
-    # don't auto-reset the robot just because the nominal training episode length elapsed -
-    # only reset on an actual failure (fall / bad contact), so an interactive run isn't cut
-    # off mid-climb
+    # don't auto-reset on episode timeout - only on an actual fall, so climbs aren't cut off
     env_cfg.env.episode_length_s = 1e9
     if args.task == "go2_stairs":
         # single continuously-ascending U-shaped staircase, one robot, no curriculum grid
@@ -136,9 +134,7 @@ def play(args):
             if has_viewer:
                 if env.gym.query_viewer_has_closed(env.viewer):
                     break
-                # this drains the viewer's whole event queue, so replicate the
-                # built-in QUIT / toggle_viewer_sync handling normally done inside
-                # env.render() (it would otherwise see an already-empty queue)
+                # drains the viewer's event queue, so replicate QUIT/toggle_viewer_sync handling here too
                 for evt in env.gym.query_viewer_action_events(env.viewer):
                     if evt.action == "QUIT" and evt.value > 0:
                         sys.exit()
@@ -159,16 +155,16 @@ def play(args):
                     elif evt.action == "vyaw_minus":
                         commands[2] = max(commands[2].item() - VYAW_STEP, env.command_ranges["ang_vel_yaw"][0])
                     elif evt.action == "toggle_follow_camera":
-                        # leave the camera wherever the last follow update put it - just stop
-                        # driving it every frame, instead of snapping back to the default pose
+                        # leave the camera wherever the last follow update put it, don't snap back to default
                         follow_camera = not follow_camera
                     elif evt.action == "reset":
                         env.reset_idx(torch.arange(env.num_envs, device=env.device))
                         commands[:] = 0.
 
-                env.commands[:, 0] = commands[0]
+                # same dead zone _resample_commands uses, so keyboard commands match the training distribution
+                env.commands[:, 0] = commands[0] if abs(commands[0]) > VEL_DEADZONE else 0.0
                 env.commands[:, 1] = commands[1]
-                env.commands[:, 2] = commands[2]
+                env.commands[:, 2] = commands[2] if abs(commands[2]) > VEL_DEADZONE else 0.0
 
             actions = policy(obs.detach())
             obs, _, rews, dones, infos = env.step(actions.detach())
@@ -200,9 +196,7 @@ def play(args):
     except KeyboardInterrupt:
         pass
     finally:
-        # Ctrl+C during a blocked C-extension call (cv2's GUI event loop, matplotlib's backend,
-        # IsaacGym's viewer/physx) can otherwise take several presses to actually exit - clean up
-        # what we can, then hard-exit immediately instead of waiting on normal interpreter shutdown.
+        # Ctrl+C during a blocked GUI call can take multiple presses - clean up then hard-exit
         if use_camera:
             cv2.destroyAllWindows()
         plt.close(fig)

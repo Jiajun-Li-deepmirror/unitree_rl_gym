@@ -14,10 +14,8 @@ from legged_gym.utils.math import quat_apply_yaw
 
 
 class GO2Stairs(LeggedRobot):
-    """ GO2 trained on stairs terrain. Adds trimesh terrain generation and height-scan sensing
-        on top of the base LeggedRobot. The raw height scan is appended to the proprioceptive
-        observation as-is; it's encoded into a latent by ActorCriticHeightEncoder (trained
-        end-to-end with the policy), not by the env - see legged_gym/algorithms/.
+    """ GO2 trained on stairs terrain: trimesh generation + height-scan sensing. Height scan is
+        raw (encoded by ActorCriticHeightEncoder, not here) - see legged_gym/algorithms/.
     """
 
     def create_sim(self):
@@ -40,10 +38,8 @@ class GO2Stairs(LeggedRobot):
         self._init_camera()
 
     def _build_u_shape_terrain(self):
-        """ A single continuously-ascending U-shaped (switchback) staircase: flight 1 climbs
-            in +x, a landing turns the walking direction around, flight 2 climbs further
-            going back in -x, one flight-width over in y. Bypasses the curriculum Terrain
-            grid entirely - meant for a single robot (play_keyboard.py showcase run).
+        """ U-shaped switchback staircase: flight 1 climbs +x, turns at a landing, flight 2
+            climbs further in -x. Bypasses the curriculum grid - single-robot showcase terrain.
         """
         cfg = self.cfg.terrain
         u_cfg = cfg.u_shape
@@ -56,8 +52,7 @@ class GO2Stairs(LeggedRobot):
         flight_width_px = max(round(u_cfg.flight_width / horizontal_scale), 1)
         platform_px = max(round(u_cfg.platform_size / horizontal_scale), 1)
         top_platform_px = max(round(u_cfg.top_platform_size / horizontal_scale), 1)
-        # flight 1 and flight 2 share this x-range (mirrored, offset in y); the run-up before
-        # flight 1 has to be at least as wide as the top platform carved out of it below flight 2
+        # flight 1/2 share this x-range; run-up must be >= top_platform so it isn't overwritten
         run_up_px = max(platform_px, top_platform_px)
 
         x_extent = run_up_px + u_cfg.num_steps * step_width_px + platform_px
@@ -83,9 +78,7 @@ class GO2Stairs(LeggedRobot):
         landing_start = x
         height_field_raw[landing_start:landing_start + platform_px, y0:y0 + y_extent] = height
 
-        # flight 2: continues climbing, going back in -x, one flight-width over in y - starts
-        # flush against the landing's near edge (NOT its far edge) so it doesn't climb back
-        # into and overwrite part of the landing; ends back at flight 1's own start x
+        # flight 2 climbs back in -x, one flight-width over in y, starting at the landing's near edge
         x = landing_start
         for _ in range(u_cfg.num_steps):
             x_start = x - step_width_px
@@ -93,8 +86,7 @@ class GO2Stairs(LeggedRobot):
             height_field_raw[x_start:x, y1:y1 + flight_width_px] = height
             x = x_start
 
-        # top platform: flat landing at the final height, carved out of the run_up_px region
-        # (same x-range as the bottom spawn area, but on flight 2's y-strip)
+        # top platform: flat landing at the final height, carved out of the run-up region
         height_field_raw[x - top_platform_px:x, y1:y1 + flight_width_px] = height
 
         vertices, triangles = terrain_utils.convert_heightfield_to_trimesh(
@@ -106,12 +98,7 @@ class GO2Stairs(LeggedRobot):
         terrain.heightsamples = height_field_raw
         terrain.tot_rows, terrain.tot_cols = tot_rows, tot_cols
         terrain.vertices, terrain.triangles = vertices, triangles
-        # spawn just in front of flight 1's first step (facing the stairs), not centered on
-        # the run-up platform. NOTE: env_origins is a *world* position, added directly to
-        # root_states - and the mesh itself is placed at world = pixel*horizontal_scale -
-        # border_size (see _create_trimesh), which exactly cancels the border_px pixel
-        # padding baked into every x/y index here. So this must NOT add border_px/y0 back in,
-        # or the spawn point ends up shifted by a full border_size (default 25m) off the mesh.
+        # spawn near flight 1's first step; NOTE: don't add border_px/y0 back in (mesh placement already cancels it) or spawn shifts by border_size
         spawn_margin_px = min(max(round(0.6 / horizontal_scale), 1), run_up_px)
         spawn_x = (run_up_px - spawn_margin_px) * horizontal_scale
         spawn_y = (flight_width_px / 2) * horizontal_scale
@@ -133,12 +120,9 @@ class GO2Stairs(LeggedRobot):
         self._compute_edge_mask()
 
     def _compute_edge_mask(self):
-        """ Marks heightfield cells that sit right next to a height jump exceeding
-            rewards.edge_height_threshold, used to penalize feet landing right on a stair edge
-            instead of solidly on a tread. A "prepend" diff alone only flags the cell on the
-            high side of each jump (the convex nosing/lip of the higher tread); the matching
-            "append" diff flags the cell on the low side too (the concave corner at the base
-            of the riser), so both sides of every edge get caught.
+        """ Marks cells next to a height jump > edge_height_threshold, used to penalize feet on a
+            stair edge. prepend-diff flags the high side, append-diff flags the low side, so both
+            sides of every edge get caught.
         """
         height_field = self.terrain.height_field_raw.astype(np.float32) * self.cfg.terrain.vertical_scale
         threshold = self.cfg.rewards.edge_height_threshold
@@ -151,26 +135,23 @@ class GO2Stairs(LeggedRobot):
 
     def _reset_root_states(self, env_ids):
         if not self.cfg.terrain.u_shape_playground:
-            super()._reset_root_states(env_ids)
-            # override two things about the base class's reset:
-            # - random spawn yaw, so the policy doesn't overfit to always facing the same
-            #   direction relative to the terrain curriculum grid (base class spawns at the
-            #   fixed cfg.init_state.rot orientation otherwise)
-            # - zero spawn velocity instead of the base class's random +-0.5 m/s / rad/s - after
-            #   a fall (or timeout) the robot should restart cleanly at rest, not already
-            #   drifting/spinning
-            yaw = torch_rand_float(-math.pi, math.pi, (len(env_ids), 1), device=self.device).squeeze(1)
+            # skip the base class's +-1m xy jitter here too, so envs sharing the same
+            # (terrain_level, terrain_type) truly spawn at the identical point instead of each
+            # scattering randomly within a 2m box around it
+            self.root_states[env_ids] = self.base_init_state
+            self.root_states[env_ids, :3] += self.env_origins[env_ids]
+            # random spawn yaw in +-1.0 rad (not full +-pi, so it still generally faces the stairs)
+            yaw = torch_rand_float(-1.0, 1.0, (len(env_ids), 1), device=self.device).squeeze(1)
             zeros = torch.zeros_like(yaw)
             self.root_states[env_ids, 3:7] = quat_from_euler_xyz(zeros, zeros, yaw)
+            # zero spawn velocity (base class randomizes +-0.5) so resets restart cleanly at rest
             self.root_states[env_ids, 7:13] = 0.
             env_ids_int32 = env_ids.to(dtype=torch.int32)
             self.gym.set_actor_root_state_tensor_indexed(
                 self.sim, gymtorch.unwrap_tensor(self.root_states),
                 gymtorch.unwrap_tensor(env_ids_int32), len(env_ids_int32))
             return
-        # same as the base class, but skips its +-1m random xy jitter: on this compact
-        # showcase platform that jitter can dump the robot onto the first step or past the
-        # platform edge, defeating the point of a fixed, deliberately placed spawn point
+        # skip the +-1m xy jitter here - could dump the robot onto/past a step on this compact platform
         self.root_states[env_ids] = self.base_init_state
         self.root_states[env_ids, :3] += self.env_origins[env_ids]
         self.root_states[env_ids, 7:13] = torch_rand_float(-0.5, 0.5, (len(env_ids), 6), device=self.device)
@@ -199,30 +180,34 @@ class GO2Stairs(LeggedRobot):
                                         (self.num_envs / self.cfg.terrain.num_cols), rounding_mode='floor').to(torch.long)
         self.terrain_origins = torch.from_numpy(self.terrain.env_origins).to(self.device).to(torch.float)
         self.max_terrain_level = self.cfg.terrain.num_rows
-        self.env_origins[:] = self.terrain_origins[self.terrain_levels, self.terrain_types]
+        self.env_origins[:] = self._terrain_spawn_origins(self.terrain_levels, self.terrain_types)
+
+    def _terrain_spawn_origins(self, terrain_levels, terrain_types):
+        """ Every env of a given (terrain_level, terrain_type) spawns at that tile's center
+            (terrain_origins, straight from Terrain.add_terrain_to_map), shifted +0.5m in x.
+        """
+        origins = self.terrain_origins[terrain_levels, terrain_types].clone()
+        origins[:, 0] += 0.5
+        return origins
 
     def reset_idx(self, env_ids):
         run_curriculum = len(env_ids) > 0 and self.cfg.terrain.curriculum and not self.cfg.terrain.u_shape_playground
         if run_curriculum:
             self._update_terrain_curriculum(env_ids)
+        if len(env_ids) > 0:
+            # reset to False; _resample_commands below will flip it back on if the new episode walks
+            self.had_walking_command[env_ids] = False
         super().reset_idx(env_ids)
         if run_curriculum:
-            # so terrain difficulty progression is visible in tensorboard, same as
-            # command curriculum's "max_command_x" a few lines up in the base class
+            # so terrain difficulty progression is visible in tensorboard
             self.extras["episode"]["terrain_level"] = torch.mean(self.terrain_levels.float())
         if len(env_ids) > 0:
             self._log_monitoring_metrics(env_ids)
 
     def _log_monitoring_metrics(self, env_ids):
-        """ Reports two metrics to tensorboard (extras["episode"], same mechanism as
-            terrain_level above) that have no reward attached and don't affect training -
-            purely for watching how well standing-still/rotating-in-place are executed.
-
-            NOTE: both keys must be set on *every* call, even when the mask below is all-False
-            (falling back to a 0 placeholder) - rsl_rl's OnPolicyRunner.log() reads the key set
-            from the first entry in ep_infos and indexes every other entry with it, so if one
-            reset batch here omitted a key that an earlier/later batch in the same rollout had,
-            it crashes with a KeyError instead of just skipping it.
+        """ Reports monitoring-only metrics to tensorboard (extras["episode"]) - no reward attached.
+            Every key must be set on every call (0 if the mask is empty) since rsl_rl's log() assumes
+            every ep_infos entry has the same key set, or it KeyErrors.
         """
         stand_mask = self.stand_still_height_err_count[env_ids] > 0
         mean_err = self.stand_still_height_err_sum[env_ids] / self.stand_still_height_err_count[env_ids].clamp(min=1)
@@ -238,10 +223,7 @@ class GO2Stairs(LeggedRobot):
         self.rotate_ang_vel_err_sum[env_ids] = 0.
         self.rotate_ang_vel_err_count[env_ids] = 0.
 
-        # fraction (0-1) of feet matching the expected trot stance/swing phase, but only
-        # counted during rotate-in-place steps - isolates "does gait_phase actually hold up
-        # during pure rotation" from the aggregate Episode/rew_gait_phase, which mixes in
-        # forward walking too and can look fine even if rotation-in-place never gaits at all.
+        # fraction of feet matching gait phase, counted only during rotate-in-place steps
         rotate_gait_mask = self.rotate_gait_match_count[env_ids] > 0
         mean_match = self.rotate_gait_match_sum[env_ids] / self.rotate_gait_match_count[env_ids].clamp(min=1)
         self.extras["episode"]["rotate_in_place_gait_match_frac"] = (
@@ -249,26 +231,44 @@ class GO2Stairs(LeggedRobot):
         self.rotate_gait_match_sum[env_ids] = 0.
         self.rotate_gait_match_count[env_ids] = 0.
 
+    def _expected_climb_height(self, terrain_levels):
+        # total height crossing every ring of a pyramid-stairs tile at this difficulty -
+        # step_width/platform_size must match terrain.py make_terrain()'s pyramid_stairs_terrain call
+        step_width = 0.31
+        platform_size = 3.0
+        num_rings = max(int((self.terrain.env_length - platform_size) / (2 * step_width)), 0)
+        difficulty = terrain_levels.float() / self.cfg.terrain.num_rows
+        step_height = 0.05 + 0.278 * difficulty  # must match terrain.py make_terrain()
+        return num_rings * step_height
+
     def _update_terrain_curriculum(self, env_ids):
-        """ Moves each env to a harder terrain row if it walked far enough this episode (past
-            half the terrain tile length), or an easier one if it barely covered the ground its
-            own commanded speed implied it should have. Must run BEFORE _reset_dofs/
-            _reset_root_states (hence the reset_idx override above, calling this first) since it
-            reads the pre-reset root_states and updates env_origins in place, which the reset
-            then spawns the robot at.
+        """ Moves each env to a harder/easier terrain row based on BOTH forward (+x) progress
+            from its spawn point (vs. half the tile length) AND actual height climbed (vs. half
+            the tile's total climbable height) - x alone can't tell a real climb from just
+            drifting forward. Envs that never sampled a walking command this episode are excluded.
         """
         if not self.init_done:
             return
-        distance = torch.norm(self.root_states[env_ids, :2] - self.env_origins[env_ids, :2], dim=1)
-        move_up = distance > self.terrain.env_length / 2
-        move_down = (distance < torch.norm(self.commands[env_ids, :2], dim=1) * self.max_episode_length_s * 0.5) & ~move_up
+        forward_distance = self.root_states[env_ids, 0] - self.env_origins[env_ids, 0]
+        height_change = torch.abs(self.root_states[env_ids, 2] - self.env_origins[env_ids, 2])
+        expected_climb = self._expected_climb_height(self.terrain_levels[env_ids])
+        had_walking_command = self.had_walking_command[env_ids]
+
+        made_forward_progress = forward_distance > self.terrain.env_length / 2
+        made_height_progress = height_change > expected_climb / 2
+        move_up = made_forward_progress & made_height_progress & had_walking_command
+
+        lacked_forward_progress = forward_distance < torch.norm(self.commands[env_ids, :2], dim=1) * self.max_episode_length_s * 0.5
+        lacked_height_progress = height_change < expected_climb / 2
+        move_down = lacked_forward_progress & lacked_height_progress & ~move_up & had_walking_command
+
         self.terrain_levels[env_ids] += 1 * move_up - 1 * move_down
         self.terrain_levels[env_ids] = torch.where(
             self.terrain_levels[env_ids] >= self.max_terrain_level,
             torch.randint_like(self.terrain_levels[env_ids], self.max_terrain_level),
             torch.clip(self.terrain_levels[env_ids], 0),
         )
-        self.env_origins[env_ids] = self.terrain_origins[self.terrain_levels[env_ids], self.terrain_types[env_ids]]
+        self.env_origins[env_ids] = self._terrain_spawn_origins(self.terrain_levels[env_ids], self.terrain_types[env_ids])
 
     def _init_height_points(self):
         y = torch.tensor(self.cfg.height_scan.measured_points_y, device=self.device, requires_grad=False)
@@ -281,11 +281,7 @@ class GO2Stairs(LeggedRobot):
         return points
 
     def _get_heights(self):
-        # nearest-cell lookup (round, not floor+min-of-neighbors): the old min(px,py / px+1,py /
-        # px,py+1) only ever looked in the +x/+y direction, which is a no-op on an ascending
-        # staircase (that neighbor is same-or-higher) but silently pulls the reading down to the
-        # next (lower) tread's height on a descending one - systematically under-reporting height
-        # right at the edge cell of every downward step, never on upward ones.
+        # nearest-cell (round) lookup - the old floor+min-of-neighbors under-reported height on descending stairs
         world_points = quat_apply_yaw(self.base_quat.repeat(1, self.num_height_points), self.height_points) \
             + self.root_states[:, :3].unsqueeze(1)
         points = world_points + self.terrain.cfg.border_size
@@ -297,12 +293,9 @@ class GO2Stairs(LeggedRobot):
         return heights.view(self.num_envs, -1) * self.terrain.cfg.vertical_scale
 
     def _draw_debug_vis(self):
-        """ Draws a small sphere at every height-scan sample point: red if that point falls
-            on a stair-edge cell (self.x_edge_mask, same mask _reward_feet_edge uses), green
-            otherwise. Recomputed fresh from the CURRENT root/base state every call (rather
-            than reusing values cached during this step's _get_heights()) so it can't ever
-            draw one step's spheres against a different step's (post-reset) robot pose -
-            that mismatch is what caused the visible flicker/jumping.
+        """ Draws a sphere at every height-scan point: red on a stair-edge cell, green otherwise.
+            Recomputed fresh from the current root/base state every call, so it never draws one
+            step's spheres against a different (post-reset) pose.
         """
         self.gym.clear_lines(self.viewer)
 
@@ -325,10 +318,7 @@ class GO2Stairs(LeggedRobot):
                 geom = red if is_edge[i, j] else green
                 gymutil.draw_lines(geom, self.gym, self.viewer, self.envs[i], pose)
 
-        # the height-scan spheres above are a fixed grid around the base, NOT the feet - they
-        # don't tell you anything about what _reward_feet_edge is actually seeing. Draw the 4
-        # feet separately, using the exact same lookup _reward_feet_edge uses, so "is this foot
-        # on an edge" can actually be checked visually instead of eyeballing the scan grid.
+        # also draw the 4 feet using _reward_feet_edge's exact lookup, so it can be checked visually
         feet_at_edge = self._feet_at_edge().cpu().numpy()
         feet_xy = self.feet_pos[:, :, :2].cpu().numpy()
         feet_z = self.feet_pos[:, :, 2].cpu().numpy()
@@ -341,9 +331,8 @@ class GO2Stairs(LeggedRobot):
                 gymutil.draw_lines(geom, self.gym, self.viewer, self.envs[i], pose)
 
     def _feet_at_edge(self):
-        """ Which feet currently sit on an x_edge_mask cell, regardless of contact - shared by
-            _reward_feet_edge (which additionally requires contact) and the debug-vis markers
-            above, so the visualization can never disagree with what the reward actually sees.
+        """ Which feet sit on an x_edge_mask cell, regardless of contact - shared by
+            _reward_feet_edge and the debug-vis markers above.
         """
         feet_pos_xy = ((self.feet_pos[:, :, :2] + self.terrain.cfg.border_size) / self.cfg.terrain.horizontal_scale).long()
         feet_pos_xy[..., 0] = torch.clip(feet_pos_xy[..., 0], 0, self.x_edge_mask.shape[0] - 1)
@@ -351,9 +340,8 @@ class GO2Stairs(LeggedRobot):
         return self.x_edge_mask[feet_pos_xy[..., 0], feet_pos_xy[..., 1]]
 
     def _draw_camera_fov(self, color=(1.0, 0.6, 0.0)):
-        """ Draws a small wireframe pyramid from the depth camera's current position out to a
-            small rectangle at cam_cfg.fov_viz_length, sized to match its actual
-            horizontal_fov/aspect ratio - a quick visual sanity check of where it's looking.
+        """ Draws a small wireframe pyramid from the camera's position, sized to its actual
+            horizontal_fov/aspect ratio - a visual sanity check of where it's looking.
         """
         cam_cfg = self.cfg.camera
         env_h = self.envs[0]
@@ -388,10 +376,9 @@ class GO2Stairs(LeggedRobot):
         self.gym.add_lines(self.viewer, env_h, 8, vertices, colors)
 
     def render(self, sync_frame_time=True):
-        """ Same as BaseTask.render(), except the height-scan/camera-FOV debug lines are
-            (re)drawn right before gym.draw_viewer() - not from post_physics_step(), a step
-            earlier - since clearing/adding them anywhere else left a window where the viewer
-            could capture a half-updated line buffer, which is what caused the flicker.
+        """ Same as BaseTask.render(), but debug lines are (re)drawn right before draw_viewer()
+            instead of a step earlier in post_physics_step(), which left a stale line buffer that
+            caused visible flicker.
         """
         if not self.viewer:
             return
@@ -427,9 +414,8 @@ class GO2Stairs(LeggedRobot):
         self.feet_pos = self.rigid_body_states_view[:, self.feet_indices, :3]
 
     def _init_camera(self):
-        """ Mounts a depth camera on env 0 only (see cfg.camera) - interactive use in
-            play_keyboard.py, never enabled during training (cfg.camera.use_camera is always
-            False unless play_keyboard.py's --use_camera flag turns it on for num_envs=1).
+        """ Mounts a depth camera on env 0 only - interactive use in play_keyboard.py, never
+            enabled during training (cfg.camera.use_camera is always False otherwise).
         """
         self.camera_handle = None
         cam_cfg = self.cfg.camera
@@ -445,15 +431,13 @@ class GO2Stairs(LeggedRobot):
         body_handle = self.gym.find_actor_rigid_body_handle(self.envs[0], self.actor_handles[0], cam_cfg.mount_body)
         local_transform = gymapi.Transform()
         local_transform.p = gymapi.Vec3(*cam_cfg.mount_pos)
-        # identity attach looks along the body's local +x (forward); pitching around local y
-        # tilts the view down toward the ground/stairs ahead
+        # identity attach looks along the body's local +x; pitching around local y tilts the view down
         local_transform.r = gymapi.Quat.from_axis_angle(gymapi.Vec3(0, 1, 0), cam_cfg.mount_pitch)
         self.gym.attach_camera_to_body(self.camera_handle, self.envs[0], body_handle, local_transform, gymapi.FOLLOW_TRANSFORM)
 
     def get_camera_depth_image(self):
-        """ Renders and returns the mounted depth camera's current image as a (height, width)
-            numpy array of positive distances in meters (IMAGE_DEPTH itself returns negative
-            distances). Only valid when cfg.camera.use_camera is True.
+        """ Renders and returns the depth image as a (height, width) array of positive meters
+            (IMAGE_DEPTH itself returns negative distances). Only valid when use_camera is True.
         """
         self.gym.render_all_camera_sensors(self.sim)
         depth = self.gym.get_camera_image(self.sim, self.envs[0], self.camera_handle, gymapi.IMAGE_DEPTH)
@@ -470,10 +454,7 @@ class GO2Stairs(LeggedRobot):
             self.height_points = self._init_height_points()
             self.measured_heights = torch.zeros(self.num_envs, self.num_height_points, device=self.device, requires_grad=False)
 
-        # monitoring-only accumulators (tensorboard via extras["episode"], no reward attached -
-        # see reset_idx): mean |base height error| while standing still, and mean |vyaw error|
-        # while rotating in place, both averaged over however many steps each env actually spent
-        # in that state during the episode.
+        # monitoring-only accumulators for extras["episode"] (see reset_idx), no reward attached
         self.stand_still_height_err_sum = torch.zeros(self.num_envs, device=self.device)
         self.stand_still_height_err_count = torch.zeros(self.num_envs, device=self.device)
         self.rotate_ang_vel_err_sum = torch.zeros(self.num_envs, device=self.device)
@@ -481,11 +462,13 @@ class GO2Stairs(LeggedRobot):
         self.rotate_gait_match_sum = torch.zeros(self.num_envs, device=self.device)
         self.rotate_gait_match_count = torch.zeros(self.num_envs, device=self.device)
 
+        # tracks whether this episode ever sampled a walking command (see _update_terrain_curriculum)
+        self.had_walking_command = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+
     def _post_physics_step_callback(self):
         self._update_gait_phase()
         self.update_feet_state()
-        # NOTE: computed from self.last_contacts before _reward_feet_air_time (which runs
-        # later, in compute_reward) overwrites it with this step's contact state.
+        # NOTE: uses self.last_contacts before _reward_feet_air_time overwrites it this step
         contact = self.contact_forces[:, self.feet_indices, 2] > 1.
         self.contact_filt = torch.logical_or(contact, self.last_contacts)
         if self.cfg.terrain.measure_heights:
@@ -508,10 +491,8 @@ class GO2Stairs(LeggedRobot):
         return super()._post_physics_step_callback()
 
     def _command_mode(self):
-        """ Which of the three command_proportions categories is currently active, derived
-            directly from self.commands (not stored/latched state) - shared by the monitoring
-            accumulators in _post_physics_step_callback and the mode one-hot appended to the
-            observation in compute_observations, so both always agree.
+        """ Which command_proportions category is active, derived fresh from self.commands - shared
+            by the monitoring accumulators and the mode one-hot in compute_observations.
             Returns (is_standing_still, is_rotating_in_place, is_walking), each (num_envs,) bool.
         """
         is_standing_still = torch.all(torch.abs(self.commands[:, :3]) < 1e-6, dim=1)
@@ -521,12 +502,9 @@ class GO2Stairs(LeggedRobot):
         return is_standing_still, is_rotating_in_place, is_walking
 
     def _resample_commands(self, env_ids):
-        """ Draws each env's new command from one of three categories (cfg.commands.
-            command_proportions): stand still (all zero), rotate in place (vx=vy=0, |vyaw|
-            floored so it never degrades to ~0), or normal velocity sampling - same lin_vel_x/
-            lin_vel_y/ang_vel_yaw ranges as the base class (heading_command is always False for
-            this task), but zeroing vx/vyaw independently below their own 0.1 threshold instead
-            of the base class's combined-xy-norm > 0.2 check.
+        """ Draws each env's command from command_proportions: stand still, rotate in place
+            (vyaw floored so it never decays to ~0), or normal sampling with the same 0.1 dead
+            zone as the base class's combined-norm check.
         """
         proportions = torch.cumsum(torch.tensor(self.cfg.commands.command_proportions, device=self.device), dim=0)
         choice = torch.rand(len(env_ids), device=self.device) * proportions[-1]
@@ -556,6 +534,10 @@ class GO2Stairs(LeggedRobot):
             self.commands[normal_ids, 0] *= torch.abs(self.commands[normal_ids, 0]) > 0.1
             self.commands[normal_ids, 2] *= torch.abs(self.commands[normal_ids, 2]) > 0.1
 
+        # record if this resample landed on "walking" (post dead-zone, via _command_mode)
+        _, _, is_walking = self._command_mode()
+        self.had_walking_command[env_ids] |= is_walking[env_ids]
+
     def _update_gait_phase(self):
         """ Trotting gait phase for the diagonal leg pairs (FL+RR / FR+RL).
             feet_indices order is [FL, FR, RL, RR] (URDF body order filtered by foot_name).
@@ -569,9 +551,7 @@ class GO2Stairs(LeggedRobot):
         self.gait_enabled = torch.any(self.commands[:, :3] != 0., dim=1)
 
     def compute_observations(self):
-        # Raw height scan (not an encoded latent): the encoder is a trainable submodule of
-        # ActorCriticHeightEncoder now, so it needs to see the actual scan to be able to learn
-        # anything from it - see legged_gym/algorithms/height_actor_critic.py.
+        # raw height scan (not encoded) - the encoder is trainable, lives in ActorCriticHeightEncoder
         height_scan = torch.clip(
             self.root_states[:, 2].unsqueeze(1) - self.cfg.rewards.base_height_target - self.measured_heights,
             -1, 1.,
@@ -581,14 +561,11 @@ class GO2Stairs(LeggedRobot):
                            * self.cfg.noise.noise_level * self.obs_scales.height_measurements)
             height_scan += (2 * torch.rand_like(height_scan) - 1) * noise_scale
 
-        # lets the policy know where it is in the trot cycle (same idea as h1_env.py's
-        # sin/cos phase) - without this it has no way to tell which foot _reward_gait_phase
-        # currently expects to be swinging vs. planted, only the indirect reward signal.
+        # sin/cos gait phase, so the policy knows where it is in the trot cycle
         sin_phase = torch.sin(2 * torch.pi * self.phase).unsqueeze(1)
         cos_phase = torch.cos(2 * torch.pi * self.phase).unsqueeze(1)
 
-        # one-hot [stand still, rotate in place, walking] - solved directly from self.commands
-        # (see _command_mode), not stored state, so it's always in sync with the actual command.
+        # one-hot [stand still, rotate in place, walking], derived fresh via _command_mode
         is_standing_still, is_rotating_in_place, is_walking = self._command_mode()
         command_mode = torch.stack((is_standing_still, is_rotating_in_place, is_walking), dim=1).float()
 
@@ -605,34 +582,23 @@ class GO2Stairs(LeggedRobot):
             command_mode,
             height_scan,
         ), dim=-1)
-        # add noise if needed (noise_scale_vec is zero-padded over the height-scan tail,
-        # since noise there is already injected into the raw height scan above)
+        # noise_scale_vec is zero-padded over the height-scan tail (noise already added above)
         if self.add_noise:
             self.obs_buf += (2 * torch.rand_like(self.obs_buf) - 1) * self.noise_scale_vec
 
     def _stance_relative_base_height(self):
-        # Base height measured relative to the feet currently on the ground (not the world
-        # z=0 plane, since the stairs terrain isn't flat) - shared by _reward_base_height and
-        # the (non-training) stand_still_base_height_error monitoring metric below.
+        # base height relative to stance feet (not world z=0), since stairs terrain isn't flat
         contact = (self.contact_forces[:, self.feet_indices, 2] > 1.).float()
         contact_count = contact.sum(dim=1).clamp(min=1)
         stance_height = (self.feet_pos[:, :, 2] * contact).sum(dim=1) / contact_count
         return self.root_states[:, 2] - stance_height
 
     def _reward_base_height(self):
-        # Penalize base height away from target, measured relative to the feet currently on the
-        # ground (not the world z=0 plane, since the stairs terrain isn't flat) so this doesn't
-        # depend on the height-scan implementation.
+        # penalize base height error, measured relative to stance feet not world z=0
         return torch.square(self._stance_relative_base_height() - self.cfg.rewards.base_height_target)
 
     def _reward_feet_air_time(self):
-        # Same as the base class (LeggedRobot), except the "is the robot actually trying to
-        # move" gate is self.gait_enabled (any of vx/vy/vyaw nonzero) instead of just
-        # norm(commands[:,:2]) - the base version zeroes this reward whenever vx=vy=0, which
-        # silently killed the only incentive to actually lift a foot during in-place rotation
-        # (vyaw-only commands). gait_phase alone doesn't fill that gap: it only checks whether
-        # contact timing matches the expected phase, which is satisfied ~50% of the time by
-        # coincidence even if no foot ever leaves the ground.
+        # same as base class, but gated on gait_enabled (any vx/vy/vyaw) not just lin commands, so rotate-in-place still rewards lifting a foot
         contact = self.contact_forces[:, self.feet_indices, 2] > 1.
         contact_filt = torch.logical_or(contact, self.last_contacts)
         self.last_contacts = contact
@@ -644,9 +610,7 @@ class GO2Stairs(LeggedRobot):
         return rew_airTime
 
     def _gait_phase_match_count(self):
-        # how many feet (0..len(feet_indices)) currently have their contact state matching the
-        # expected trot stance/swing phase - shared by _reward_gait_phase and the
-        # rotate_in_place_gait_match_frac monitoring metric below.
+        # feet count currently matching expected trot phase - shared by _reward_gait_phase and monitoring
         res = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         for i in range(len(self.feet_indices)):
             is_stance = self.leg_phase[:, i] < 0.55
@@ -659,9 +623,7 @@ class GO2Stairs(LeggedRobot):
         return self._gait_phase_match_count() * self.gait_enabled
 
     def _reward_feet_swing_height(self):
-        # Penalize swing (non-contact) feet for missing cfg.rewards.feet_swing_height_target
-        # clearance above the terrain directly beneath them (not world z, since the stairs
-        # terrain isn't flat), only while actually gaited (moving) - same gate as _reward_gait_phase.
+        # penalize swing feet missing the target clearance above local terrain, while gaited
         feet_pos_xy = ((self.feet_pos[:, :, :2] + self.terrain.cfg.border_size) / self.cfg.terrain.horizontal_scale).round().long()  # (num_envs, 4, 2)
         feet_pos_xy[..., 0] = torch.clip(feet_pos_xy[..., 0], 0, self.height_samples.shape[0] - 1)
         feet_pos_xy[..., 1] = torch.clip(feet_pos_xy[..., 1], 0, self.height_samples.shape[1] - 1)
@@ -673,29 +635,24 @@ class GO2Stairs(LeggedRobot):
         return torch.sum(swing_error, dim=1) * self.gait_enabled
 
     def _reward_stand_still(self):
-        # Penalize motion away from the default pose, but only when vx, vy AND vyaw are all zero
+        # penalize motion away from the default pose, but only when vx, vy AND vyaw are all zero
         return torch.sum(torch.abs(self.dof_pos - self.default_dof_pos), dim=1) * (~self.gait_enabled)
 
     def _reward_stand_still_contact(self):
-        # Extra bonus for keeping all four feet planted while standing still (on top of the
-        # stand_still pose penalty above), so it doesn't shift weight/shuffle feet with no
-        # velocity command instead of just settling into a stable stance.
+        # bonus for keeping all 4 feet planted while standing still, on top of the pose penalty
         all_feet_contact = torch.all(self.contact_forces[:, self.feet_indices, 2] > 1., dim=1)
         return all_feet_contact.float() * (~self.gait_enabled)
 
     def _reward_dof_pos_deviation(self):
-        # Penalize joint angles drifting from their default pose at all times (unlike
-        # stand_still, this isn't gated on zero commands) - keeps the gait close to a natural,
-        # nominal posture instead of finding degenerate joint configurations while moving.
+        # penalize joint deviation from default at all times, not just when standing still
         return torch.sum(torch.square(self.dof_pos - self.default_dof_pos), dim=1)
 
     def _reward_feet_edge(self):
-        # Penalize feet contacting the terrain right on a stair edge (unstable foothold),
-        # only once the curriculum has advanced past the easiest terrain rows.
+        # penalize feet on a stair edge, only past the easiest terrain rows
         self.feet_at_edge = self.contact_filt & self._feet_at_edge()
         rew = (self.terrain_levels > 3) * torch.sum(self.feet_at_edge, dim=-1)
         return rew.float()
 
     def _reward_hip_pos(self):
-        # Penalize hip joints drifting from their default angle (keeps the stance width stable)
+        # penalize hip joints drifting from their default angle (keeps the stance width stable)
         return torch.sum(torch.square(self.dof_pos[:, self.hip_indices] - self.default_dof_pos[:, self.hip_indices]), dim=1)
