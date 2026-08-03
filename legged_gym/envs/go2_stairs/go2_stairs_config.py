@@ -139,15 +139,15 @@ class GO2StairsCfg( LeggedRobotCfg ):
             dof_acc = -2.5e-7
             base_height = -2.0
             feet_air_time = 1.0
-            collision = -1.
-            stumble = -1.0
+            collision = -0.5
+            stumble = -0.5
             action_rate = -0.01
             stand_still = -0.5
             dof_pos_limits = -10.0
 
             gait_phase = .4
             feet_swing_height = -10.0
-            feet_edge = -1.0
+            feet_edge = -0.5
             hip_pos = -1.0
             # stand_still_contact = 0.2
             # dof_pos_deviation = -0.1

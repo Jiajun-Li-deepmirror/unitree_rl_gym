@@ -333,18 +333,28 @@ class GO2Stairs(LeggedRobot):
         self.reset_buf |= early_stop
         self.time_out_buf |= early_stop
 
+    def _first_step_height(self, terrain_levels):
+        # height of just the first stair riser at this difficulty - must match
+        # _build_wave_stairs_terrain's step_height formula
+        difficulty = terrain_levels.float() / self.cfg.terrain.num_rows
+        return 0.05 + 0.278 * difficulty
+
     def _update_terrain_curriculum(self, env_ids):
-        """ Moves each env to a harder/easier terrain row based on forward (+x) progress from
-            its spawn point vs. half the ridge length (terrain.env_length). Envs that never
-            sampled a (heading-aligned) walking command this episode are excluded - see
-            had_walking_command.
+        """ Moves each env to a harder terrain row on forward (+x) progress past half the ridge
+            length (terrain.env_length), or an easier one if it didn't even clear the first stair
+            riser (height change < one step_height) - much more lenient than requiring full
+            distance, so a slow-but-real attempt at a harder level isn't instantly bounced back
+            down. Envs that never sampled a (heading-aligned) walking command are excluded.
         """
         if not self.init_done:
             return
         forward_distance = self.root_states[env_ids, 0] - self.env_origins[env_ids, 0]
+        height_change = torch.abs(self.root_states[env_ids, 2] - self.env_origins[env_ids, 2])
         had_walking_command = self.had_walking_command[env_ids]
+
         move_up = (forward_distance > self.terrain.env_length / 2) & had_walking_command
-        move_down = (forward_distance < torch.norm(self.commands[env_ids, :2], dim=1) * self.max_episode_length_s * 0.5) & ~move_up & had_walking_command
+        didnt_clear_first_step = height_change < self._first_step_height(self.terrain_levels[env_ids])
+        move_down = didnt_clear_first_step & ~move_up & had_walking_command
 
         self.terrain_levels[env_ids] += 1 * move_up - 1 * move_down
         self.terrain_levels[env_ids] = torch.where(
@@ -719,10 +729,7 @@ class GO2Stairs(LeggedRobot):
         return res
 
     def _reward_gait_phase(self):
-        # reward feet contact state matching the expected stance/swing of the trot phase, only
-        # while rotating in place (not walking, so the stair-climbing gait can adapt freely)
-        _, is_rotating_in_place, _ = self._command_mode()
-        return self._gait_phase_match_count() * is_rotating_in_place
+        return self._gait_phase_match_count() * self.gait_enabled
 
     def _reward_feet_swing_height(self):
         # penalize swing feet missing the target clearance above local terrain, while gaited
@@ -736,9 +743,7 @@ class GO2Stairs(LeggedRobot):
         # only penalize falling short of the target - clearing higher (e.g. a tall stair riser) is fine
         shortfall = torch.clamp(self.cfg.rewards.feet_swing_height_target - clearance, min=0.)
         swing_error = torch.square(shortfall) * (~contact)
-        # only enforced while rotating in place (not walking, so the stair-climbing gait can adapt freely)
-        _, is_rotating_in_place, _ = self._command_mode()
-        return torch.sum(swing_error, dim=1) * is_rotating_in_place
+        return torch.sum(swing_error, dim=1) * self.gait_enabled
 
     def _reward_stand_still(self):
         # penalize motion away from the default pose, but only when vx, vy AND vyaw are all zero
