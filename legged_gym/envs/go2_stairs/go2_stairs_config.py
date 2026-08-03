@@ -37,14 +37,7 @@ class GO2StairsCfg( LeggedRobotCfg ):
         mesh_type = 'trimesh'
         curriculum = True
         measure_heights = True
-        # finer than the base default (0.1) - at 0.1, a 0.25m wave_stairs tread is only 2 cells
-        # wide, and _compute_edge_mask always flags 1 cell on each side of a height jump, so
-        # both cells got marked "edge" and no tread had any non-edge (green) cells at all.
         horizontal_scale = 0.05
-        # convert_heightfield_to_trimesh only makes a step riser vertical when its height jump
-        # exceeds slope_treshold*horizontal_scale (=0.075m at the base default 0.75); the easiest
-        # wave_stairs row's 0.05m step falls under that, so its riser stayed a sloped face.
-        # Lowered so even the smallest step (0.05m) clears the threshold (0.3*0.1=0.03m).
         slope_treshold = 0.3
         # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete]
         terrain_proportions = [0.0, 0.0, 0.5, 0.5, 0.0]
@@ -71,7 +64,7 @@ class GO2StairsCfg( LeggedRobotCfg ):
         num_commands = 4
         resampling_time = 10. # time before commands are changed [s]
         heading_command = False
-        command_proportions = [0.2, 0.2, 0.6]
+        command_proportions = [0.1, 0.1, 0.8]
         rotate_in_place_ang_vel_min = 0.1 # [rad/s], floor on |vyaw| so "rotate" never degrades to ~0
         class ranges:
             lin_vel_x = [0.0, 1.2]   # min max [m/s] - forward walking disabled for this phase
