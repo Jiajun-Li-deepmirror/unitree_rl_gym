@@ -225,9 +225,9 @@ class GO2Stairs(LeggedRobot):
             # scattering randomly within a 2m box around it
             self.root_states[env_ids] = self.base_init_state
             self.root_states[env_ids, :3] += self.env_origins[env_ids]
-            # full-range random spawn yaw - heading-command tracking (see _post_physics_step_callback)
-            # turns walking envs back toward the climb direction regardless of spawn orientation
-            yaw = torch_rand_float(-math.pi, math.pi, (len(env_ids), 1), device=self.device).squeeze(1)
+            # random spawn yaw in +-90deg - heading-command tracking (see _post_physics_step_callback)
+            # still turns walking envs the rest of the way toward the climb direction
+            yaw = torch_rand_float(-math.pi / 2, math.pi / 2, (len(env_ids), 1), device=self.device).squeeze(1)
             zeros = torch.zeros_like(yaw)
             self.root_states[env_ids, 3:7] = quat_from_euler_xyz(zeros, zeros, yaw)
             # zero spawn velocity (base class randomizes +-0.5) so resets restart cleanly at rest
@@ -315,6 +315,23 @@ class GO2Stairs(LeggedRobot):
             torch.mean(mean_match[rotate_gait_mask]) if rotate_gait_mask.any() else torch.zeros((), device=self.device))
         self.rotate_gait_match_sum[env_ids] = 0.
         self.rotate_gait_match_count[env_ids] = 0.
+
+    def check_termination(self):
+        super().check_termination()
+        if self.cfg.terrain.u_shape_playground:
+            return
+        # end the episode as soon as this ridge's climb is done, instead of letting the robot
+        # keep walking forward into the next (harder) ridge's territory before its level updates -
+        # exactly the same forward-progress check _update_terrain_curriculum uses for move_up.
+        # Also end it if it's wandered off the sides of its own assigned tile in y. Neither is a
+        # failure, so both get folded into time_out_buf too (exempts them from _reward_termination).
+        forward_distance = self.root_states[:, 0] - self.env_origins[:, 0]
+        finished_climb = (forward_distance > self.terrain.env_length / 2) & self.had_walking_command
+        lateral_distance = torch.abs(self.root_states[:, 1] - self.env_origins[:, 1])
+        off_tile = lateral_distance > self.terrain.env_width / 2
+        early_stop = finished_climb | off_tile
+        self.reset_buf |= early_stop
+        self.time_out_buf |= early_stop
 
     def _update_terrain_curriculum(self, env_ids):
         """ Moves each env to a harder/easier terrain row based on forward (+x) progress from

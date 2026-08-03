@@ -15,8 +15,8 @@ import torch
 def play(args):
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
     # override some parameters for testing
-    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 8)
-    env_cfg.terrain.num_rows = 2
+    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 16)
+    env_cfg.terrain.num_rows = 4
     env_cfg.terrain.num_cols = 1
     env_cfg.terrain.curriculum = False
     env_cfg.noise.add_noise = False
@@ -39,9 +39,10 @@ def play(args):
         export_policy_as_jit(ppo_runner.alg.actor_critic, path)
         print('Exported policy as jit script to: ', path)
 
-    for i in range(10*int(env.max_episode_length)):
-        actions = policy(obs.detach())
-        obs, _, rews, dones, infos = env.step(actions.detach())
+    with torch.no_grad():
+        for i in range(10*int(env.max_episode_length)):
+            actions = policy(obs.detach())
+            obs, _, rews, dones, infos = env.step(actions.detach())
 
 if __name__ == '__main__':
     EXPORT_POLICY = True
