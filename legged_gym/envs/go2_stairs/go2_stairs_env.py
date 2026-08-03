@@ -6,7 +6,7 @@ import numpy as np
 import torch
 
 from isaacgym import gymapi, gymtorch, gymutil, terrain_utils
-from isaacgym.torch_utils import torch_rand_float, quat_from_euler_xyz
+from isaacgym.torch_utils import torch_rand_float
 
 from legged_gym.envs.base.legged_robot import LeggedRobot
 from legged_gym.utils.isaacgym_utils import get_euler_xyz as get_euler_xyz_in_tensor
@@ -225,10 +225,7 @@ class GO2Stairs(LeggedRobot):
             # scattering randomly within a 2m box around it
             self.root_states[env_ids] = self.base_init_state
             self.root_states[env_ids, :3] += self.env_origins[env_ids]
-            # random spawn yaw in +-1.0 rad (not full +-pi, so it still generally faces the stairs)
-            yaw = torch_rand_float(-1.0, 1.0, (len(env_ids), 1), device=self.device).squeeze(1)
-            zeros = torch.zeros_like(yaw)
-            self.root_states[env_ids, 3:7] = quat_from_euler_xyz(zeros, zeros, yaw)
+            # spawn yaw stays at cfg.init_state.rot's default (0) - no randomization
             # zero spawn velocity (base class randomizes +-0.5) so resets restart cleanly at rest
             self.root_states[env_ids, 7:13] = 0.
             env_ids_int32 = env_ids.to(dtype=torch.int32)

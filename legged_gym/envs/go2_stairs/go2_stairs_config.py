@@ -37,6 +37,10 @@ class GO2StairsCfg( LeggedRobotCfg ):
         mesh_type = 'trimesh'
         curriculum = True
         measure_heights = True
+        # finer than the base default (0.1) - at 0.1, a 0.25m wave_stairs tread is only 2 cells
+        # wide, and _compute_edge_mask always flags 1 cell on each side of a height jump, so
+        # both cells got marked "edge" and no tread had any non-edge (green) cells at all.
+        horizontal_scale = 0.05
         # convert_heightfield_to_trimesh only makes a step riser vertical when its height jump
         # exceeds slope_treshold*horizontal_scale (=0.075m at the base default 0.75); the easiest
         # wave_stairs row's 0.05m step falls under that, so its riser stayed a sloped face.
@@ -49,7 +53,7 @@ class GO2StairsCfg( LeggedRobotCfg ):
         u_shape_playground = False
         class u_shape:
             num_steps = 12       # steps per flight
-            step_width = 0.3     # [m] depth of each step
+            step_width = 0.25     # [m] depth of each step
             step_height = 0.2   # [m] rise of each step
             flight_width = 2.0   # [m] width of each flight
             platform_size = 1.0  # [m] flat spawn run-up / mid-turn landing length
@@ -57,7 +61,7 @@ class GO2StairsCfg( LeggedRobotCfg ):
 
         class wave_stairs:
             num_steps_per_side = 8
-            step_width = 0.31        # [m] depth of each step
+            step_width = 0.25        # [m] depth of each step
             lead_in_size = 1.0       # [m] flat trough before the climb starts (also the descent's landing)
             peak_platform_size = 0.5  # [m] flat platform at each ridge's peak
 

@@ -17,7 +17,7 @@ def play(args):
     # override some parameters for testing
     env_cfg.env.num_envs = min(env_cfg.env.num_envs, 100)
     env_cfg.terrain.num_rows = 5
-    env_cfg.terrain.num_cols = 5
+    env_cfg.terrain.num_cols = 2
     env_cfg.terrain.curriculum = False
     env_cfg.noise.add_noise = False
     env_cfg.domain_rand.randomize_friction = False
