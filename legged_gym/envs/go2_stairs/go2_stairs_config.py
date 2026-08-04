@@ -43,6 +43,31 @@ class GO2StairsCfg( LeggedRobotCfg ):
         # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, flat]
         terrain_proportions = [0.0, 0.0, 0.4, 0.4, 0.0, 0.2]
 
+        # single continuously-ascending U-shaped staircase, used by play_keyboard.py
+        u_shape_playground = False
+        class u_shape:
+            num_steps = 12       # steps per flight
+            step_width = 0.25     # [m] depth of each step
+            step_height = 0.2   # [m] rise of each step
+            flight_width = 2.0   # [m] width of each flight
+            platform_size = 1.0  # [m] flat spawn run-up / mid-turn landing length
+            top_platform_size = 1.5  # [m] flat landing at the top of flight 2
+
+    class camera:
+        use_camera = False
+        # resolution/fps: Depth Output Resolution "Up to 544 x 640" @ "Up to 15 fps"
+        width = 544
+        height = 640
+        scale = 0.5  # uniform scale factor applied to width/height (e.g. 0.5 to halve resolution)
+        fps = 15
+        near_plane = 1e-5
+        far_plane = 5.0  # [m]
+        horizontal_fov = 87.0  # [deg]
+        mount_body = "Head_lower"  # front/chin mount point already present on the go2 URDF
+        mount_pos = [0.05, 0.0, 0.15]  # local offset from mount_body's own origin [m]
+        mount_pitch = 0.5236  # [rad] ~30 deg downward tilt, to see the ground/stairs ahead
+        fov_viz_length = 0.1  # [m] length of the small FOV pyramid drawn in play_keyboard.py
+
     class commands( LeggedRobotCfg.commands ):
         curriculum = False
         heading_command = False

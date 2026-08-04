@@ -23,6 +23,11 @@ def play(args):
     env_cfg.noise.add_noise = False
     env_cfg.domain_rand.randomize_friction = False
     env_cfg.domain_rand.push_robots = False
+    if hasattr(env_cfg.commands, "command_proportions"):
+        # equal thirds: stand still / rotate in place / walk, instead of whatever
+        # iteration-ramped mix training happened to reach
+        env_cfg.commands.command_proportions = [1.0, 1.0, 1.0]
+        env_cfg.commands.command_curriculum.enabled = False
 
     env_cfg.env.test = True
 
