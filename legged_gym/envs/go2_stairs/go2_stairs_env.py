@@ -164,7 +164,13 @@ class GO2Stairs(LeggedRobot):
         # so _reward_delta_torques compares this step's torques against the previous step's
         self.last_torques[:] = self.torques[:]
 
+    def _update_gait_phase(self):
+        # phase within the trot cycle, in [0, 1) - used for the obs sin/cos phase encoding below
+        cycle_time = self.cfg.rewards.cycle_time
+        self.phase = (self.episode_length_buf * self.dt) % cycle_time / cycle_time
+
     def _post_physics_step_callback(self):
+        self._update_gait_phase()
         self.gym.refresh_rigid_body_state_tensor(self.sim)
         # NOTE: uses self.last_contacts before _reward_feet_air_time overwrites it this step
         contact = self.contact_forces[:, self.feet_indices, 2] > 1.
@@ -256,7 +262,10 @@ class GO2Stairs(LeggedRobot):
         noise_vec[12:12+self.num_actions] = noise_scales.dof_pos * noise_level * self.obs_scales.dof_pos
         noise_vec[12+self.num_actions:12+2*self.num_actions] = noise_scales.dof_vel * noise_level * self.obs_scales.dof_vel
         noise_vec[12+2*self.num_actions:12+3*self.num_actions] = 0. # previous actions
-        noise_vec[12+3*self.num_actions:] = noise_scales.height_measurements * noise_level * self.obs_scales.height_measurements
+        tail_start = 12 + 3*self.num_actions
+        noise_vec[tail_start:tail_start+2] = 0. # sin/cos gait phase
+        noise_vec[tail_start+2:tail_start+5] = 0. # one-hot command mode
+        noise_vec[tail_start+5:] = noise_scales.height_measurements * noise_level * self.obs_scales.height_measurements
         return noise_vec
 
     def compute_observations(self):
@@ -264,6 +273,15 @@ class GO2Stairs(LeggedRobot):
             self.root_states[:, 2].unsqueeze(1) - self.cfg.rewards.base_height_target - self.measured_heights,
             -1, 1.,
         ) * self.obs_scales.height_measurements
+
+        # sin/cos gait phase, so the policy knows where it is in the trot cycle
+        sin_phase = torch.sin(2 * torch.pi * self.phase).unsqueeze(1)
+        cos_phase = torch.cos(2 * torch.pi * self.phase).unsqueeze(1)
+
+        # one-hot [stand still, rotate in place, walking], derived fresh via _command_mode
+        is_standing_still, is_rotating_in_place, is_walking = self._command_mode()
+        command_mode = torch.stack((is_standing_still, is_rotating_in_place, is_walking), dim=1).float()
+
         self.obs_buf = torch.cat((
             self.base_lin_vel * self.obs_scales.lin_vel,
             self.base_ang_vel * self.obs_scales.ang_vel,
@@ -272,6 +290,9 @@ class GO2Stairs(LeggedRobot):
             (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos,
             self.dof_vel * self.obs_scales.dof_vel,
             self.actions,
+            sin_phase,
+            cos_phase,
+            command_mode,
             height_scan,
         ), dim=-1)
         if self.add_noise:

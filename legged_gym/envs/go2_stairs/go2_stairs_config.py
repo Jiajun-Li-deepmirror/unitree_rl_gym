@@ -10,7 +10,7 @@ NUM_HEIGHT_POINTS = len(MEASURED_POINTS_X) * len(MEASURED_POINTS_Y)
 class GO2StairsCfg( LeggedRobotCfg ):
     class env( LeggedRobotCfg.env ):
         num_envs = 4096
-        num_observations = 48 + NUM_HEIGHT_POINTS  # proprio (48) + raw height-scan points
+        num_observations = 48 + 2 + 3 + NUM_HEIGHT_POINTS  # proprio (48) + gait sin/cos phase (2) + command-mode one-hot (3) + raw height-scan points
 
     class init_state( LeggedRobotCfg.init_state ):
         pos = [0.0, 0.0, 0.42] # x,y,z [m]
@@ -83,6 +83,7 @@ class GO2StairsCfg( LeggedRobotCfg ):
         max_contact_force = 40. # forces above this value are penalized
         tracking_sigma = 0.2 # tracking reward = exp(-error^2/sigma)
         edge_height_threshold = 0.03 # [m], min height jump between neighboring terrain cells to count as a stair edge
+        cycle_time = 0.5 # [s], gait phase cycle period used for the obs sin/cos phase encoding
         class scales( LeggedRobotCfg.rewards.scales ):
             # regularization
             lin_vel_z = -1.0
