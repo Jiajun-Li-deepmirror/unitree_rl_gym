@@ -4,6 +4,7 @@ import numpy as np
 import torch
 
 from isaacgym import gymapi, gymtorch, gymutil
+from isaacgym.torch_utils import quat_from_euler_xyz, torch_rand_float
 
 from legged_gym.envs.base.legged_robot import LeggedRobot
 from legged_gym.utils.terrain import Terrain
@@ -72,14 +73,17 @@ class GO2Stairs(LeggedRobot):
         self._init_flat_terrain_mask()
 
     def _init_flat_terrain_mask(self):
-        """ Marks which envs sit on the smooth-slope column - the terrain_proportions[0] share
-            configured as flat ground - by replicating the `choice` comparison Terrain.curiculum()
-            used to pick that column's terrain (see legged_gym/utils/terrain.py). Used by
-            _reward_lin_vel_z/_reward_orientation to only apply their full penalty there.
+        """ Marks which envs sit on the dedicated flat column - terrain_proportions' last entry,
+            a genuinely flat terrain type (see Terrain.make_terrain in legged_gym/utils/terrain.py) -
+            by replicating the `choice` comparison Terrain.curiculum() used to pick that column's
+            terrain. Used by _reward_lin_vel_z/_reward_orientation to only apply their full penalty
+            there.
         """
         choice = self.terrain_types.float() / self.cfg.terrain.num_cols + 0.001
-        smooth_slope_cutoff = self.cfg.terrain.terrain_proportions[0]
-        self.is_flat_terrain = choice < smooth_slope_cutoff
+        proportions = self.cfg.terrain.terrain_proportions
+        flat_lower = sum(proportions[:-1]) # cumulative share before the flat slot
+        flat_upper = sum(proportions) # flat is always the last configured terrain type
+        self.is_flat_terrain = (choice >= flat_lower) & (choice < flat_upper)
 
     def _update_terrain_curriculum(self, env_ids):
         """ Moves each env to a harder terrain row if it walked past half the tile, or an easier
@@ -98,6 +102,20 @@ class GO2Stairs(LeggedRobot):
             torch.clip(self.terrain_levels[env_ids], 0),
         )
         self.env_origins[env_ids] = self.terrain_origins[self.terrain_levels[env_ids], self.terrain_types[env_ids]]
+
+    def _reset_root_states(self, env_ids):
+        """ Same as the base class, but with a uniformly random initial yaw instead of the fixed
+            orientation from init_state.rot - stairs are approached from a random heading during
+            training so the policy doesn't overfit to always starting square with the terrain.
+        """
+        super()._reset_root_states(env_ids)
+        yaw = torch_rand_float(-np.pi, np.pi, (len(env_ids), 1), device=self.device).squeeze(1)
+        zeros = torch.zeros_like(yaw)
+        self.root_states[env_ids, 3:7] = quat_from_euler_xyz(zeros, zeros, yaw)
+        env_ids_int32 = env_ids.to(dtype=torch.int32)
+        self.gym.set_actor_root_state_tensor_indexed(self.sim,
+                                                      gymtorch.unwrap_tensor(self.root_states),
+                                                      gymtorch.unwrap_tensor(env_ids_int32), len(env_ids_int32))
 
     def reset_idx(self, env_ids):
         if self.cfg.terrain.curriculum:

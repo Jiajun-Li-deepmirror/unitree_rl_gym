@@ -40,10 +40,11 @@ class GO2StairsCfg( LeggedRobotCfg ):
         slope_treshold = 0.3
         measured_points_x = MEASURED_POINTS_X
         measured_points_y = MEASURED_POINTS_Y
-        # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete]
-        # smooth slope is flat at difficulty 0 (row 0 of the curriculum) and only ramps up with row,
-        # so this is the closest thing to a "flat ground" class this terrain generator supports
-        terrain_proportions = [0.2, 0.0, 0.4, 0.4, 0.0]
+        # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, flat]
+        terrain_proportions = [0.0, 0.0, 0.4, 0.4, 0.0, 0.2]
+        
+        stair_height_base = 0.05
+        stair_height_scale = 0.2778
 
     class commands( LeggedRobotCfg.commands ):
         curriculum = False
