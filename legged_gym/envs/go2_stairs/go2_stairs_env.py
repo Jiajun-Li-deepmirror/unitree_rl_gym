@@ -424,11 +424,11 @@ class GO2Stairs(LeggedRobot):
         return res
 
     def _reward_gait_phase(self):
-        # rewarded while rotating in place or walking, but only on flat ground - excluded on
-        # stairs, where a strict trot phase isn't necessarily the right gait while climbing/
-        # turning on uneven footing, so the stair-climbing gait is left free to adapt there
+        # rewarded while rotating in place or walking, on any terrain - the diagonal trot phase
+        # itself is still the target gait on stairs, unlike feet_swing_height's fixed clearance
+        # target which doesn't make sense once foot height depends on the terrain step
         _, is_rotating_in_place, is_walking = self._command_mode()
-        return self._gait_phase_match_count() * (is_rotating_in_place | is_walking) * self.is_flat_terrain
+        return self._gait_phase_match_count() * (is_rotating_in_place | is_walking)
 
     def _reward_feet_swing_height(self):
         # penalize swing feet missing the target clearance above local terrain, while rotating
