@@ -84,6 +84,7 @@ class GO2StairsCfg( LeggedRobotCfg ):
         tracking_sigma = 0.2 # tracking reward = exp(-error^2/sigma)
         edge_height_threshold = 0.03 # [m], min height jump between neighboring terrain cells to count as a stair edge
         cycle_time = 0.5 # [s], gait phase cycle period used for the obs sin/cos phase encoding
+        feet_swing_height_target = 0.10 # [m], target swing-foot clearance above the terrain while rotating in place
         class scales( LeggedRobotCfg.rewards.scales ):
             # regularization
             lin_vel_z = -1.0
@@ -97,9 +98,16 @@ class GO2StairsCfg( LeggedRobotCfg ):
             dof_pos_limits = -10.0
             hip_pos = -0.5
             dof_error = -0.04
-            
+
             feet_stumble = -1.
             feet_edge = -1.
+
+            # rotate-in-place + flat terrain only (see _command_mode/is_flat_terrain gating in go2_stairs_env.py)
+            gait_phase = 0.4
+            feet_swing_height = -10.0
+
+            # stand-still only, any terrain
+            stand_still_contact = 0.2
 
     class height_encoder:
         # MLP that encodes the raw height-scan points into a latent appended to the observation

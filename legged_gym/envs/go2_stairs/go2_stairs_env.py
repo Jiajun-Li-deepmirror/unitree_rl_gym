@@ -165,9 +165,16 @@ class GO2Stairs(LeggedRobot):
         self.last_torques[:] = self.torques[:]
 
     def _update_gait_phase(self):
-        # phase within the trot cycle, in [0, 1) - used for the obs sin/cos phase encoding below
+        """ Trotting gait phase for the diagonal leg pairs (FL+RR / FR+RL).
+            feet_indices order is [FL, FR, RL, RR] (URDF body order filtered by foot_name).
+        """
         cycle_time = self.cfg.rewards.cycle_time
-        self.phase = (self.episode_length_buf * self.dt) % cycle_time / cycle_time
+        phase = (self.episode_length_buf * self.dt) % cycle_time / cycle_time
+        self.phase = phase  # stashed for compute_observations' sin/cos phase encoding
+        phase_offsets = torch.tensor([0.0, 0.5, 0.5, 0.0], device=self.device)
+        self.leg_phase = (phase.unsqueeze(1) + phase_offsets.unsqueeze(0)) % 1.0
+        # only enforce the alternating gait when a non-zero lin/ang vel command is given
+        self.gait_enabled = torch.any(self.commands[:, :3] != 0., dim=1)
 
     def _post_physics_step_callback(self):
         self._update_gait_phase()
@@ -405,3 +412,42 @@ class GO2Stairs(LeggedRobot):
         # (not 5x) horizontal/vertical contact-force ratio, matching the reference
         return torch.any(torch.norm(self.contact_forces[:, self.feet_indices, :2], dim=2) >
                           4 * torch.abs(self.contact_forces[:, self.feet_indices, 2]), dim=1).float()
+
+    def _gait_phase_match_count(self):
+        # feet count currently matching expected trot phase - shared by _reward_gait_phase and
+        # could double as a monitoring metric later
+        res = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        for i in range(len(self.feet_indices)):
+            is_stance = self.leg_phase[:, i] < 0.55
+            contact = self.contact_forces[:, self.feet_indices[i], 2] > 1.
+            res += ~(contact ^ is_stance)
+        return res
+
+    def _reward_gait_phase(self):
+        # only rewarded while rotating in place AND on flat ground (not walking, so the
+        # stair-climbing gait can adapt freely, and not on stairs, where a strict trot phase
+        # isn't necessarily the right gait while turning on uneven footing)
+        _, is_rotating_in_place, _ = self._command_mode()
+        return self._gait_phase_match_count() * is_rotating_in_place * self.is_flat_terrain
+
+    def _reward_feet_swing_height(self):
+        # penalize swing feet missing the target clearance above local terrain, only while
+        # rotating in place AND on flat ground
+        feet_pos_xy = ((self.rigid_body_states[:, self.feet_indices, :2] + self.terrain.cfg.border_size) / self.cfg.terrain.horizontal_scale).round().long()
+        feet_pos_xy[..., 0] = torch.clip(feet_pos_xy[..., 0], 0, self.height_samples.shape[0] - 1)
+        feet_pos_xy[..., 1] = torch.clip(feet_pos_xy[..., 1], 0, self.height_samples.shape[1] - 1)
+        terrain_height = self.height_samples[feet_pos_xy[..., 0], feet_pos_xy[..., 1]] * self.terrain.cfg.vertical_scale
+        clearance = self.rigid_body_states[:, self.feet_indices, 2] - terrain_height
+
+        contact = self.contact_forces[:, self.feet_indices, 2] > 1.
+        # only penalize falling short of the target - clearing higher (e.g. a tall stair riser) is fine
+        shortfall = torch.clamp(self.cfg.rewards.feet_swing_height_target - clearance, min=0.)
+        swing_error = torch.square(shortfall) * (~contact)
+        _, is_rotating_in_place, _ = self._command_mode()
+        return torch.sum(swing_error, dim=1) * is_rotating_in_place * self.is_flat_terrain
+
+    def _reward_stand_still_contact(self):
+        # bonus for keeping all 4 feet planted while standing still, on any terrain
+        is_standing_still, _, _ = self._command_mode()
+        all_feet_contact = torch.all(self.contact_forces[:, self.feet_indices, 2] > 1., dim=1)
+        return all_feet_contact.float() * is_standing_still
