@@ -424,15 +424,15 @@ class GO2Stairs(LeggedRobot):
         return res
 
     def _reward_gait_phase(self):
-        # only rewarded while rotating in place AND on flat ground (not walking, so the
-        # stair-climbing gait can adapt freely, and not on stairs, where a strict trot phase
-        # isn't necessarily the right gait while turning on uneven footing)
-        _, is_rotating_in_place, _ = self._command_mode()
-        return self._gait_phase_match_count() * is_rotating_in_place * self.is_flat_terrain
+        # rewarded while rotating in place or walking, but only on flat ground - excluded on
+        # stairs, where a strict trot phase isn't necessarily the right gait while climbing/
+        # turning on uneven footing, so the stair-climbing gait is left free to adapt there
+        _, is_rotating_in_place, is_walking = self._command_mode()
+        return self._gait_phase_match_count() * (is_rotating_in_place | is_walking) * self.is_flat_terrain
 
     def _reward_feet_swing_height(self):
-        # penalize swing feet missing the target clearance above local terrain, only while
-        # rotating in place AND on flat ground
+        # penalize swing feet missing the target clearance above local terrain, while rotating
+        # in place or walking, but only on flat ground (see _reward_gait_phase)
         feet_pos_xy = ((self.rigid_body_states[:, self.feet_indices, :2] + self.terrain.cfg.border_size) / self.cfg.terrain.horizontal_scale).round().long()
         feet_pos_xy[..., 0] = torch.clip(feet_pos_xy[..., 0], 0, self.height_samples.shape[0] - 1)
         feet_pos_xy[..., 1] = torch.clip(feet_pos_xy[..., 1], 0, self.height_samples.shape[1] - 1)
@@ -443,8 +443,8 @@ class GO2Stairs(LeggedRobot):
         # only penalize falling short of the target - clearing higher (e.g. a tall stair riser) is fine
         shortfall = torch.clamp(self.cfg.rewards.feet_swing_height_target - clearance, min=0.)
         swing_error = torch.square(shortfall) * (~contact)
-        _, is_rotating_in_place, _ = self._command_mode()
-        return torch.sum(swing_error, dim=1) * is_rotating_in_place * self.is_flat_terrain
+        _, is_rotating_in_place, is_walking = self._command_mode()
+        return torch.sum(swing_error, dim=1) * (is_rotating_in_place | is_walking) * self.is_flat_terrain
 
     def _reward_stand_still_contact(self):
         # bonus for keeping all 4 feet planted while standing still, on any terrain

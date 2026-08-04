@@ -102,7 +102,7 @@ class GO2StairsCfg( LeggedRobotCfg ):
             feet_stumble = -1.
             feet_edge = -1.
 
-            # rotate-in-place + flat terrain only (see _command_mode/is_flat_terrain gating in go2_stairs_env.py)
+            # rotate-in-place/walk + flat terrain only (see _command_mode/is_flat_terrain gating in go2_stairs_env.py)
             gait_phase = 0.4
             feet_swing_height = -10.0
 
