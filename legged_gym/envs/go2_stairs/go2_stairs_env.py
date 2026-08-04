@@ -210,8 +210,10 @@ class GO2Stairs(LeggedRobot):
                 envs only
         """
         curr_cfg = self.cfg.commands.command_curriculum
-        current_iteration = self.common_step_counter // curr_cfg.num_steps_per_env
-        num_increments = current_iteration // curr_cfg.increment_interval
+        num_increments = 0
+        if curr_cfg.enabled:
+            current_iteration = self.common_step_counter // curr_cfg.num_steps_per_env
+            num_increments = current_iteration // curr_cfg.increment_interval
         stand_w, rotate_w, walk_w = self.cfg.commands.command_proportions
         stand_w = stand_w + curr_cfg.increment * num_increments
         rotate_w = rotate_w + curr_cfg.increment * num_increments

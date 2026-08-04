@@ -42,21 +42,13 @@ class GO2StairsCfg( LeggedRobotCfg ):
         measured_points_y = MEASURED_POINTS_Y
         # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, flat]
         terrain_proportions = [0.0, 0.0, 0.4, 0.4, 0.0, 0.2]
-        
-        stair_height_base = 0.05
-        stair_height_scale = 0.2778
 
     class commands( LeggedRobotCfg.commands ):
         curriculum = False
-        # kept False so the base class doesn't force vyaw from heading on EVERY env every step -
-        # that would override stand-still/rotate-in-place's own direct vyaw too. GO2Stairs
-        # implements the same heading->vyaw tracking itself in _post_physics_step_callback,
-        # scoped to walking envs only (see _resample_commands/_command_mode)
         heading_command = False
-        # sampling weights for the 3 command modes: [stand still, rotate in place, walk].
-        # Starts all-walking; command_curriculum below ramps stand/rotate up over training.
         command_proportions = [0.0, 0.0, 1.0]
         class command_curriculum:
+            enabled = True            # set False to keep command_proportions fixed (e.g. for play/eval)
             increment = 0.05          # added to the stand & rotate weights each interval below
             increment_interval = 2000 # [iterations]
             num_steps_per_env = 24    # must match GO2StairsCfgPPO.runner.num_steps_per_env
@@ -80,7 +72,7 @@ class GO2StairsCfg( LeggedRobotCfg ):
         file = '{LEGGED_GYM_ROOT_DIR}/resources/robots/go2/urdf/go2.urdf'
         name = "go2"
         foot_name = "foot"
-        penalize_contacts_on = ["thigh", "calf"]
+        penalize_contacts_on = ["thigh", "calf", "base"]
         terminate_after_contacts_on = ["base"]
         self_collisions = 1 # 1 to disable, 0 to enable...bitwise filter
 
