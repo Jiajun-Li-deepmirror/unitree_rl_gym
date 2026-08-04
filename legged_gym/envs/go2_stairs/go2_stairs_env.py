@@ -4,11 +4,11 @@ import numpy as np
 import torch
 
 from isaacgym import gymapi, gymtorch, gymutil
-from isaacgym.torch_utils import quat_from_euler_xyz, torch_rand_float
+from isaacgym.torch_utils import quat_apply, quat_from_euler_xyz, torch_rand_float
 
 from legged_gym.envs.base.legged_robot import LeggedRobot
 from legged_gym.utils.terrain import Terrain
-from legged_gym.utils.math import quat_apply_yaw
+from legged_gym.utils.math import quat_apply_yaw, wrap_to_pi
 
 
 class GO2Stairs(LeggedRobot):
@@ -171,7 +171,76 @@ class GO2Stairs(LeggedRobot):
         self.contact_filt = torch.logical_or(contact, self.last_contacts)
         if self.cfg.terrain.measure_heights:
             self.measured_heights = self._get_heights()
-        return super()._post_physics_step_callback()
+        result = super()._post_physics_step_callback()
+
+        # heading-command tracking, walking envs only - turns the sampled heading target
+        # (commands[:,3]) into vyaw (commands[:,2]) every step, base-class style, but scoped so
+        # stand-still/rotate-in-place envs keep their own directly-sampled vyaw untouched
+        # (heading_command is False so the base class doesn't do this for every env itself)
+        _, _, is_walking = self._command_mode()
+        if torch.any(is_walking):
+            forward = quat_apply(self.base_quat, self.forward_vec)
+            heading = torch.atan2(forward[:, 1], forward[:, 0])
+            target_ang_vel = torch.clip(
+                0.5 * wrap_to_pi(self.commands[:, 3] - heading),
+                self.command_ranges["ang_vel_yaw"][0], self.command_ranges["ang_vel_yaw"][1],
+            )
+            self.commands[is_walking, 2] = target_ang_vel[is_walking]
+        return result
+
+    def _command_mode(self):
+        """ Which command_proportions category is currently active, derived fresh from
+            self.commands (not cached from _resample_commands, since most envs don't resample
+            every step). Returns (is_standing_still, is_rotating_in_place, is_walking), each
+            shaped (num_envs,) bool.
+        """
+        is_standing_still = torch.all(torch.abs(self.commands[:, :3]) < 1e-6, dim=1)
+        is_rotating_in_place = (torch.abs(self.commands[:, 0]) < 1e-6) & (torch.abs(self.commands[:, 1]) < 1e-6) \
+            & (torch.abs(self.commands[:, 2]) >= 1e-6)
+        is_walking = ~is_standing_still & ~is_rotating_in_place
+        return is_standing_still, is_rotating_in_place, is_walking
+
+    def _resample_commands(self, env_ids):
+        """ Draws each env's command from one of 3 modes, weighted by cfg.commands.command_proportions
+            (ramped up over training - see cfg.commands.command_curriculum):
+              - stand still: vx = vy = vyaw = 0
+              - rotate in place: vx = vy = 0, vyaw sampled from ang_vel_yaw range
+              - walk: vx/vy sampled from their ranges; vyaw is tracked every step from a sampled
+                heading target (commands[:,3]) in _post_physics_step_callback, scoped to walking
+                envs only
+        """
+        curr_cfg = self.cfg.commands.command_curriculum
+        current_iteration = self.common_step_counter // curr_cfg.num_steps_per_env
+        num_increments = current_iteration // curr_cfg.increment_interval
+        stand_w, rotate_w, walk_w = self.cfg.commands.command_proportions
+        stand_w = stand_w + curr_cfg.increment * num_increments
+        rotate_w = rotate_w + curr_cfg.increment * num_increments
+        proportions = torch.cumsum(torch.tensor([stand_w, rotate_w, walk_w], device=self.device), dim=0)
+        choice = torch.rand(len(env_ids), device=self.device) * proportions[-1]
+        stand_ids = env_ids[choice < proportions[0]]
+        rotate_ids = env_ids[(choice >= proportions[0]) & (choice < proportions[1])]
+        walk_ids = env_ids[choice >= proportions[1]]
+
+        self.commands[stand_ids, :4] = 0.
+
+        if len(rotate_ids) > 0:
+            self.commands[rotate_ids, 0] = 0.
+            self.commands[rotate_ids, 1] = 0.
+            self.commands[rotate_ids, 2] = torch_rand_float(
+                self.command_ranges["ang_vel_yaw"][0], self.command_ranges["ang_vel_yaw"][1],
+                (len(rotate_ids), 1), device=self.device).squeeze(1)
+            self.commands[rotate_ids, 3] = 0.
+
+        if len(walk_ids) > 0:
+            self.commands[walk_ids, 0] = torch_rand_float(
+                self.command_ranges["lin_vel_x"][0], self.command_ranges["lin_vel_x"][1],
+                (len(walk_ids), 1), device=self.device).squeeze(1)
+            self.commands[walk_ids, 1] = torch_rand_float(
+                self.command_ranges["lin_vel_y"][0], self.command_ranges["lin_vel_y"][1],
+                (len(walk_ids), 1), device=self.device).squeeze(1)
+            self.commands[walk_ids, 3] = torch_rand_float(
+                self.command_ranges["heading"][0], self.command_ranges["heading"][1],
+                (len(walk_ids), 1), device=self.device).squeeze(1)
 
     def _get_noise_scale_vec(self, cfg):
         noise_vec = torch.zeros_like(self.obs_buf[0])

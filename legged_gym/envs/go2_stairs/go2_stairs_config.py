@@ -48,12 +48,23 @@ class GO2StairsCfg( LeggedRobotCfg ):
 
     class commands( LeggedRobotCfg.commands ):
         curriculum = False
-        heading_command = True
+        # kept False so the base class doesn't force vyaw from heading on EVERY env every step -
+        # that would override stand-still/rotate-in-place's own direct vyaw too. GO2Stairs
+        # implements the same heading->vyaw tracking itself in _post_physics_step_callback,
+        # scoped to walking envs only (see _resample_commands/_command_mode)
+        heading_command = False
+        # sampling weights for the 3 command modes: [stand still, rotate in place, walk].
+        # Starts all-walking; command_curriculum below ramps stand/rotate up over training.
+        command_proportions = [0.0, 0.0, 1.0]
+        class command_curriculum:
+            increment = 0.05          # added to the stand & rotate weights each interval below
+            increment_interval = 2000 # [iterations]
+            num_steps_per_env = 24    # must match GO2StairsCfgPPO.runner.num_steps_per_env
         class ranges( LeggedRobotCfg.commands.ranges ):
-            lin_vel_x = [0.0, 1.2]     # min max [m/s]
-            lin_vel_y = [0.0, 0.0]     # min max [m/s]
-            ang_vel_yaw = [-0.75, 0.75] # min max [rad/s], also the clip bound for heading-derived vyaw
-            heading = [-3.14, 3.14]
+            lin_vel_x = [0.0, 1.2]     # min max [m/s], walk mode only
+            lin_vel_y = [0.0, 0.0]     # min max [m/s], walk mode only
+            ang_vel_yaw = [-0.75, 0.75] # min max [rad/s]; rotate-in-place mode, and the clip bound for walk mode's heading-derived vyaw
+            heading = [-3.14, 3.14]    # walk mode only
 
     class control( LeggedRobotCfg.control ):
         # PD Drive parameters:
@@ -112,3 +123,4 @@ class GO2StairsCfgPPO( LeggedRobotCfgPPO ):
         policy_class_name = 'ActorCriticHeightEncoder'
         run_name = ''
         experiment_name = 'stairs_go2'
+        max_iterations = 6000 # must match cfg.commands.command_curriculum's increment schedule
