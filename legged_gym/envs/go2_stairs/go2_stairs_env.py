@@ -1,0 +1,297 @@
+import sys
+
+import numpy as np
+import torch
+
+from isaacgym import gymapi, gymtorch, gymutil
+
+from legged_gym.envs.base.legged_robot import LeggedRobot
+from legged_gym.utils.terrain import Terrain
+from legged_gym.utils.math import quat_apply_yaw
+
+
+class GO2Stairs(LeggedRobot):
+    """ GO2 trained on stairs terrain: trimesh generation + height-scan sensing. """
+
+    def create_sim(self):
+        self.up_axis_idx = 2
+        self.sim = self.gym.create_sim(self.sim_device_id, self.graphics_device_id, self.physics_engine, self.sim_params)
+        mesh_type = self.cfg.terrain.mesh_type
+        if mesh_type in ['heightfield', 'trimesh']:
+            self.terrain = Terrain(self.cfg.terrain, self.num_envs)
+        if mesh_type == 'plane':
+            self._create_ground_plane()
+        elif mesh_type == 'trimesh':
+            self._create_trimesh()
+        else:
+            raise ValueError(f"go2_stairs only supports terrain.mesh_type in ['plane', 'trimesh'], got '{mesh_type}'")
+        self._create_envs()
+
+    def _create_trimesh(self):
+        tm_params = gymapi.TriangleMeshParams()
+        tm_params.nb_vertices = self.terrain.vertices.shape[0]
+        tm_params.nb_triangles = self.terrain.triangles.shape[0]
+        tm_params.transform.p.x = -self.cfg.terrain.border_size
+        tm_params.transform.p.y = -self.cfg.terrain.border_size
+        tm_params.transform.p.z = 0.0
+        tm_params.static_friction = self.cfg.terrain.static_friction
+        tm_params.dynamic_friction = self.cfg.terrain.dynamic_friction
+        tm_params.restitution = self.cfg.terrain.restitution
+        self.gym.add_triangle_mesh(self.sim, self.terrain.vertices.flatten(order='C'), self.terrain.triangles.flatten(order='C'), tm_params)
+        self.height_samples = torch.tensor(self.terrain.heightsamples).view(self.terrain.tot_rows, self.terrain.tot_cols).to(self.device)
+        self._compute_edge_mask()
+
+    def _compute_edge_mask(self):
+        """ Marks cells next to a height jump > edge_height_threshold, used to penalize feet on a
+            stair edge. prepend-diff flags the high side, append-diff flags the low side, so both
+            sides of every edge get caught.
+        """
+        height_field = self.terrain.height_field_raw.astype(np.float32) * self.cfg.terrain.vertical_scale
+        threshold = self.cfg.rewards.edge_height_threshold
+        dx_hi = np.abs(np.diff(height_field, axis=0, prepend=height_field[:1, :]))
+        dx_lo = np.abs(np.diff(height_field, axis=0, append=height_field[-1:, :]))
+        dy_hi = np.abs(np.diff(height_field, axis=1, prepend=height_field[:, :1]))
+        dy_lo = np.abs(np.diff(height_field, axis=1, append=height_field[:, -1:]))
+        edge = (dx_hi > threshold) | (dx_lo > threshold) | (dy_hi > threshold) | (dy_lo > threshold)
+        self.x_edge_mask = torch.tensor(edge, device=self.device, dtype=torch.bool)
+
+    def _get_env_origins(self):
+        if self.cfg.terrain.mesh_type not in ['heightfield', 'trimesh']:
+            return super()._get_env_origins()
+        self.custom_origins = True
+        self.env_origins = torch.zeros(self.num_envs, 3, device=self.device, requires_grad=False)
+        max_init_level = self.cfg.terrain.max_init_terrain_level
+        if not self.cfg.terrain.curriculum:
+            max_init_level = self.cfg.terrain.num_rows - 1
+        self.terrain_levels = torch.randint(0, max_init_level + 1, (self.num_envs,), device=self.device)
+        self.terrain_types = torch.div(torch.arange(self.num_envs, device=self.device),
+                                        (self.num_envs / self.cfg.terrain.num_cols), rounding_mode='floor').to(torch.long)
+        self.terrain_origins = torch.from_numpy(self.terrain.env_origins).to(self.device).to(torch.float)
+        self.max_terrain_level = self.cfg.terrain.num_rows
+        self.env_origins[:] = self.terrain_origins[self.terrain_levels, self.terrain_types]
+        self._init_flat_terrain_mask()
+
+    def _init_flat_terrain_mask(self):
+        """ Marks which envs sit on the smooth-slope column - the terrain_proportions[0] share
+            configured as flat ground - by replicating the `choice` comparison Terrain.curiculum()
+            used to pick that column's terrain (see legged_gym/utils/terrain.py). Used by
+            _reward_lin_vel_z/_reward_orientation to only apply their full penalty there.
+        """
+        choice = self.terrain_types.float() / self.cfg.terrain.num_cols + 0.001
+        smooth_slope_cutoff = self.cfg.terrain.terrain_proportions[0]
+        self.is_flat_terrain = choice < smooth_slope_cutoff
+
+    def _update_terrain_curriculum(self, env_ids):
+        """ Moves each env to a harder terrain row if it walked past half the tile, or an easier
+            one if it fell well short of its commanded distance - standard legged_gym game-inspired
+            terrain curriculum.
+        """
+        if not self.init_done:
+            return
+        distance = torch.norm(self.root_states[env_ids, :2] - self.env_origins[env_ids, :2], dim=1)
+        move_up = distance > self.terrain.env_length / 2
+        move_down = (distance < torch.norm(self.commands[env_ids, :2], dim=1) * self.max_episode_length_s * 0.5) & ~move_up
+        self.terrain_levels[env_ids] += 1 * move_up - 1 * move_down
+        self.terrain_levels[env_ids] = torch.where(
+            self.terrain_levels[env_ids] >= self.max_terrain_level,
+            torch.randint_like(self.terrain_levels[env_ids], self.max_terrain_level),
+            torch.clip(self.terrain_levels[env_ids], 0),
+        )
+        self.env_origins[env_ids] = self.terrain_origins[self.terrain_levels[env_ids], self.terrain_types[env_ids]]
+
+    def reset_idx(self, env_ids):
+        if self.cfg.terrain.curriculum:
+            self._update_terrain_curriculum(env_ids)
+        super().reset_idx(env_ids)
+        if len(env_ids) > 0 and self.cfg.terrain.curriculum:
+            self.extras["episode"]["terrain_level"] = torch.mean(self.terrain_levels.float())
+
+    def _init_height_points(self):
+        y = torch.tensor(self.cfg.terrain.measured_points_y, device=self.device, requires_grad=False)
+        x = torch.tensor(self.cfg.terrain.measured_points_x, device=self.device, requires_grad=False)
+        grid_x, grid_y = torch.meshgrid(x, y)
+        self.num_height_points = grid_x.numel()
+        points = torch.zeros(self.num_envs, self.num_height_points, 3, device=self.device, requires_grad=False)
+        points[:, :, 0] = grid_x.flatten()
+        points[:, :, 1] = grid_y.flatten()
+        return points
+
+    def _get_heights(self):
+        world_points = quat_apply_yaw(self.base_quat.repeat(1, self.num_height_points), self.height_points) \
+            + self.root_states[:, :3].unsqueeze(1)
+        points = world_points + self.terrain.cfg.border_size
+        points = (points / self.terrain.cfg.horizontal_scale).round().long()
+        px = torch.clip(points[:, :, 0].view(-1), 0, self.height_samples.shape[0] - 1)
+        py = torch.clip(points[:, :, 1].view(-1), 0, self.height_samples.shape[1] - 1)
+
+        heights = self.height_samples[px, py]
+        return heights.view(self.num_envs, -1) * self.terrain.cfg.vertical_scale
+
+    def _init_buffers(self):
+        super()._init_buffers()
+        rigid_body_state = self.gym.acquire_rigid_body_state_tensor(self.sim)
+        self.rigid_body_states = gymtorch.wrap_tensor(rigid_body_state).view(self.num_envs, -1, 13)
+        self.hip_indices = torch.tensor(
+            [i for i, name in enumerate(self.dof_names) if "hip" in name],
+            dtype=torch.long, device=self.device,
+        )
+        self.last_torques = torch.zeros_like(self.torques)
+        if self.cfg.terrain.measure_heights:
+            self.height_points = self._init_height_points()
+            self.measured_heights = torch.zeros(self.num_envs, self.num_height_points, device=self.device, requires_grad=False)
+
+    def post_physics_step(self):
+        super().post_physics_step()
+        # updated after compute_reward (called inside super()), same timing as last_actions/last_dof_vel,
+        # so _reward_delta_torques compares this step's torques against the previous step's
+        self.last_torques[:] = self.torques[:]
+
+    def _post_physics_step_callback(self):
+        self.gym.refresh_rigid_body_state_tensor(self.sim)
+        # NOTE: uses self.last_contacts before _reward_feet_air_time overwrites it this step
+        contact = self.contact_forces[:, self.feet_indices, 2] > 1.
+        self.contact_filt = torch.logical_or(contact, self.last_contacts)
+        if self.cfg.terrain.measure_heights:
+            self.measured_heights = self._get_heights()
+        return super()._post_physics_step_callback()
+
+    def _get_noise_scale_vec(self, cfg):
+        noise_vec = torch.zeros_like(self.obs_buf[0])
+        self.add_noise = self.cfg.noise.add_noise
+        noise_scales = self.cfg.noise.noise_scales
+        noise_level = self.cfg.noise.noise_level
+        noise_vec[:3] = noise_scales.lin_vel * noise_level * self.obs_scales.lin_vel
+        noise_vec[3:6] = noise_scales.ang_vel * noise_level * self.obs_scales.ang_vel
+        noise_vec[6:9] = noise_scales.gravity * noise_level
+        noise_vec[9:12] = 0. # commands
+        noise_vec[12:12+self.num_actions] = noise_scales.dof_pos * noise_level * self.obs_scales.dof_pos
+        noise_vec[12+self.num_actions:12+2*self.num_actions] = noise_scales.dof_vel * noise_level * self.obs_scales.dof_vel
+        noise_vec[12+2*self.num_actions:12+3*self.num_actions] = 0. # previous actions
+        noise_vec[12+3*self.num_actions:] = noise_scales.height_measurements * noise_level * self.obs_scales.height_measurements
+        return noise_vec
+
+    def compute_observations(self):
+        height_scan = torch.clip(
+            self.root_states[:, 2].unsqueeze(1) - self.cfg.rewards.base_height_target - self.measured_heights,
+            -1, 1.,
+        ) * self.obs_scales.height_measurements
+        self.obs_buf = torch.cat((
+            self.base_lin_vel * self.obs_scales.lin_vel,
+            self.base_ang_vel * self.obs_scales.ang_vel,
+            self.projected_gravity,
+            self.commands[:, :3] * self.commands_scale,
+            (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos,
+            self.dof_vel * self.obs_scales.dof_vel,
+            self.actions,
+            height_scan,
+        ), dim=-1)
+        if self.add_noise:
+            self.obs_buf += (2 * torch.rand_like(self.obs_buf) - 1) * self.noise_scale_vec
+
+    def render(self, sync_frame_time=True):
+        """ Same as BaseTask.render(), but debug lines are (re)drawn right before draw_viewer()
+            so height-scan/feet-edge markers never lag a step behind the current pose.
+        """
+        if not self.viewer:
+            return
+        if self.gym.query_viewer_has_closed(self.viewer):
+            sys.exit()
+        for evt in self.gym.query_viewer_action_events(self.viewer):
+            if evt.action == "QUIT" and evt.value > 0:
+                sys.exit()
+            elif evt.action == "toggle_viewer_sync" and evt.value > 0:
+                self.enable_viewer_sync = not self.enable_viewer_sync
+        if self.device != 'cpu':
+            self.gym.fetch_results(self.sim, True)
+        if self.enable_viewer_sync:
+            self.gym.step_graphics(self.sim)
+            if self.cfg.terrain.measure_heights:
+                self._draw_debug_vis()
+            self.gym.draw_viewer(self.viewer, self.sim, True)
+            if sync_frame_time:
+                self.gym.sync_frame_time(self.sim)
+        else:
+            self.gym.poll_viewer_events(self.viewer)
+
+    def _draw_debug_vis(self):
+        """ Draws a sphere at every height-scan point (red on a stair-edge cell, green otherwise)
+            and a sphere at each foot (red if it's standing on a stair-edge cell), so the
+            _reward_feet_edge lookup can be sanity-checked visually during play.
+        """
+        self.gym.clear_lines(self.viewer)
+
+        world_points = quat_apply_yaw(self.base_quat.repeat(1, self.num_height_points), self.height_points) \
+            + self.root_states[:, :3].unsqueeze(1)
+        idx_points = world_points + self.terrain.cfg.border_size
+        idx_points = (idx_points / self.terrain.cfg.horizontal_scale).round().long()
+        px = torch.clip(idx_points[:, :, 0].view(-1), 0, self.height_samples.shape[0] - 1)
+        py = torch.clip(idx_points[:, :, 1].view(-1), 0, self.height_samples.shape[1] - 1)
+
+        heights = (self.height_samples[px, py].view(self.num_envs, -1) * self.terrain.cfg.vertical_scale).cpu().numpy()
+        is_edge = self.x_edge_mask[px, py].view(self.num_envs, -1).cpu().numpy()
+        world_xy = world_points[:, :, :2].cpu().numpy()
+
+        green = gymutil.WireframeSphereGeometry(0.02, 4, 4, None, color=(0, 1, 0))
+        red = gymutil.WireframeSphereGeometry(0.03, 4, 4, None, color=(1, 0, 0))
+        for i in range(self.num_envs):
+            for j in range(self.num_height_points):
+                pose = gymapi.Transform(gymapi.Vec3(float(world_xy[i, j, 0]), float(world_xy[i, j, 1]), float(heights[i, j])))
+                geom = red if is_edge[i, j] else green
+                gymutil.draw_lines(geom, self.gym, self.viewer, self.envs[i], pose)
+
+        feet_pos_xy = ((self.rigid_body_states[:, self.feet_indices, :2] + self.terrain.cfg.border_size) / self.cfg.terrain.horizontal_scale).round().long()
+        feet_pos_xy[..., 0] = torch.clip(feet_pos_xy[..., 0], 0, self.x_edge_mask.shape[0] - 1)
+        feet_pos_xy[..., 1] = torch.clip(feet_pos_xy[..., 1], 0, self.x_edge_mask.shape[1] - 1)
+        feet_at_edge = self.x_edge_mask[feet_pos_xy[..., 0], feet_pos_xy[..., 1]].cpu().numpy()
+        feet_xy = self.rigid_body_states[:, self.feet_indices, :2].cpu().numpy()
+        feet_z = self.rigid_body_states[:, self.feet_indices, 2].cpu().numpy()
+
+        foot_green = gymutil.WireframeSphereGeometry(0.03, 8, 8, None, color=(0, 1, 0))
+        foot_red = gymutil.WireframeSphereGeometry(0.045, 8, 8, None, color=(1, 0, 0))
+        for i in range(self.num_envs):
+            for k in range(len(self.feet_indices)):
+                pose = gymapi.Transform(gymapi.Vec3(float(feet_xy[i, k, 0]), float(feet_xy[i, k, 1]), float(feet_z[i, k])))
+                geom = foot_red if feet_at_edge[i, k] else foot_green
+                gymutil.draw_lines(geom, self.gym, self.viewer, self.envs[i], pose)
+
+    def _reward_feet_edge(self):
+        feet_pos_xy = ((self.rigid_body_states[:, self.feet_indices, :2] + self.terrain.cfg.border_size) / self.cfg.terrain.horizontal_scale).round().long()  # (num_envs, 4, 2)
+        feet_pos_xy[..., 0] = torch.clip(feet_pos_xy[..., 0], 0, self.x_edge_mask.shape[0]-1)
+        feet_pos_xy[..., 1] = torch.clip(feet_pos_xy[..., 1], 0, self.x_edge_mask.shape[1]-1)
+        feet_at_edge = self.x_edge_mask[feet_pos_xy[..., 0], feet_pos_xy[..., 1]]
+
+        self.feet_at_edge = self.contact_filt & feet_at_edge
+        rew = (self.terrain_levels > 3) * torch.sum(self.feet_at_edge, dim=-1)
+        return rew.float()
+
+    def _reward_hip_pos(self):
+        return torch.sum(torch.square(self.dof_pos[:, self.hip_indices] - self.default_dof_pos[:, self.hip_indices]), dim=1)
+
+    def _reward_lin_vel_z(self):
+        # full penalty only on flat terrain; halved everywhere else, since some vertical velocity
+        # is expected/unavoidable while climbing stairs
+        rew = torch.square(self.base_lin_vel[:, 2])
+        rew[~self.is_flat_terrain] *= 0.5
+        return rew
+
+    def _reward_orientation(self):
+        # only enforced on flat ground; stairs require the body to pitch to climb/descend
+        rew = torch.sum(torch.square(self.projected_gravity[:, :2]), dim=1)
+        rew[~self.is_flat_terrain] = 0.
+        return rew
+
+    def _reward_action_rate(self):
+        # aligned with reference: L2 norm of the action delta, not sum of squares (base class default)
+        return torch.norm(self.last_actions - self.actions, dim=1)
+
+    def _reward_delta_torques(self):
+        return torch.sum(torch.square(self.torques - self.last_torques), dim=1)
+
+    def _reward_dof_error(self):
+        return torch.sum(torch.square(self.dof_pos - self.default_dof_pos), dim=1)
+
+    def _reward_feet_stumble(self):
+        # penalize feet hitting vertical surfaces; same shape as base _reward_stumble but a 4x
+        # (not 5x) horizontal/vertical contact-force ratio, matching the reference
+        return torch.any(torch.norm(self.contact_forces[:, self.feet_indices, :2], dim=2) >
+                          4 * torch.abs(self.contact_forces[:, self.feet_indices, 2]), dim=1).float()

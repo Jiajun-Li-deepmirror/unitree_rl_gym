@@ -1,0 +1,113 @@
+from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobotCfgPPO
+
+# height-scan grid, in base frame (x fwd/back, y left/right). Same point counts as the base
+# class default (17 x 11 = 187) but x starts at 0 (forward-only) instead of being centered on
+# the base, since stairs are only ever climbed/descended in front of the robot.
+MEASURED_POINTS_X = [0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8]
+MEASURED_POINTS_Y = [-0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5]
+NUM_HEIGHT_POINTS = len(MEASURED_POINTS_X) * len(MEASURED_POINTS_Y)
+
+class GO2StairsCfg( LeggedRobotCfg ):
+    class env( LeggedRobotCfg.env ):
+        num_envs = 4096
+        num_observations = 48 + NUM_HEIGHT_POINTS  # proprio (48) + raw height-scan points
+
+    class init_state( LeggedRobotCfg.init_state ):
+        pos = [0.0, 0.0, 0.42] # x,y,z [m]
+        default_joint_angles = { # = target angles [rad] when action = 0.0
+            'FL_hip_joint': 0.1,   # [rad]
+            'RL_hip_joint': 0.1,   # [rad]
+            'FR_hip_joint': -0.1 ,  # [rad]
+            'RR_hip_joint': -0.1,   # [rad]
+
+            'FL_thigh_joint': 0.8,     # [rad]
+            'RL_thigh_joint': 1.,   # [rad]
+            'FR_thigh_joint': 0.8,     # [rad]
+            'RR_thigh_joint': 1.,   # [rad]
+
+            'FL_calf_joint': -1.5,   # [rad]
+            'RL_calf_joint': -1.5,    # [rad]
+            'FR_calf_joint': -1.5,  # [rad]
+            'RR_calf_joint': -1.5,    # [rad]
+        }
+
+    class terrain( LeggedRobotCfg.terrain ):
+        mesh_type = 'trimesh'
+        curriculum = True
+        measure_heights = True
+        horizontal_scale = 0.05 # [m], finer than the base default so stair edges are resolved sharply
+        vertical_scale = 0.05
+        slope_treshold = 0.3
+        measured_points_x = MEASURED_POINTS_X
+        measured_points_y = MEASURED_POINTS_Y
+        # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete]
+        # smooth slope is flat at difficulty 0 (row 0 of the curriculum) and only ramps up with row,
+        # so this is the closest thing to a "flat ground" class this terrain generator supports
+        terrain_proportions = [0.2, 0.0, 0.4, 0.4, 0.0]
+
+    class commands( LeggedRobotCfg.commands ):
+        curriculum = False
+        heading_command = True
+        class ranges( LeggedRobotCfg.commands.ranges ):
+            lin_vel_x = [0.0, 1.2]     # min max [m/s]
+            lin_vel_y = [0.0, 0.0]     # min max [m/s]
+            ang_vel_yaw = [-0.75, 0.75] # min max [rad/s], also the clip bound for heading-derived vyaw
+            heading = [-3.14, 3.14]
+
+    class control( LeggedRobotCfg.control ):
+        # PD Drive parameters:
+        control_type = 'P'
+        stiffness = {'joint': 20.}  # [N*m/rad]
+        damping = {'joint': 0.5}     # [N*m*s/rad]
+        # action scale: target angle = actionScale * action + defaultAngle
+        action_scale = 0.25
+        # decimation: Number of control action updates @ sim DT per policy DT
+        decimation = 4
+
+    class asset( LeggedRobotCfg.asset ):
+        file = '{LEGGED_GYM_ROOT_DIR}/resources/robots/go2/urdf/go2.urdf'
+        name = "go2"
+        foot_name = "foot"
+        penalize_contacts_on = ["thigh", "calf"]
+        terminate_after_contacts_on = ["base"]
+        self_collisions = 1 # 1 to disable, 0 to enable...bitwise filter
+
+    class rewards( LeggedRobotCfg.rewards ):
+        soft_dof_pos_limit = 0.9
+        soft_torque_limit = 0.4
+        base_height_target = 0.25
+        max_contact_force = 40. # forces above this value are penalized
+        tracking_sigma = 0.2 # tracking reward = exp(-error^2/sigma)
+        edge_height_threshold = 0.03 # [m], min height jump between neighboring terrain cells to count as a stair edge
+        class scales( LeggedRobotCfg.rewards.scales ):
+            # regularization
+            lin_vel_z = -1.0
+            ang_vel_xy = -0.05
+            orientation = -1.
+            dof_acc = -2.5e-7
+            collision = -10.
+            action_rate = -0.1
+            delta_torques = -1.0e-7
+            torques = -0.00001
+            dof_pos_limits = -10.0
+            hip_pos = -0.5
+            dof_error = -0.04
+            
+            feet_stumble = -1.
+            feet_edge = -1.
+
+    class height_encoder:
+        # MLP that encodes the raw height-scan points into a latent appended to the observation
+        # (trained jointly with the policy - see ActorCriticHeightEncoder in legged_gym/algorithms/)
+        hidden_dims = [128, 64]
+        latent_dim = 32
+
+class GO2StairsCfgPPO( LeggedRobotCfgPPO ):
+    # trains the height-scan encoder jointly with the policy (see legged_gym/algorithms/)
+    runner_class_name = 'HeightEncoderOnPolicyRunner'
+    class algorithm( LeggedRobotCfgPPO.algorithm ):
+        entropy_coef = 0.01
+    class runner( LeggedRobotCfgPPO.runner ):
+        policy_class_name = 'ActorCriticHeightEncoder'
+        run_name = ''
+        experiment_name = 'stairs_go2'
