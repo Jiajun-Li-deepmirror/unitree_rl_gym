@@ -643,6 +643,34 @@ class GO2Stairs(LeggedRobot):
         _, is_rotating_in_place, is_walking = self._command_mode()
         return torch.sum(swing_error, dim=1) * (is_rotating_in_place | is_walking) * self.is_flat_terrain
 
+    def _reward_stair_progress(self):
+        # rewards world-frame horizontal speed directed away from the tile's spawn point (center
+        # of the pyramid), walking mode + non-flat terrain only. tracking_lin_vel alone tops out at
+        # 1.0/step and is easy to give up on once collision/dof_pos_limits make contact-heavy
+        # climbing look risky (only_positive_rewards floors a bad step at 0, but falling still
+        # costs the rest of the episode's reward) - this adds a dedicated, direct incentive for
+        # actually crossing the stairs instead of loitering near spawn.
+        radial_dir = self.root_states[:, :2] - self.env_origins[:, :2]
+        radial_dist = torch.norm(radial_dir, dim=1).clamp(min=1e-3)
+        radial_dir = radial_dir / radial_dist.unsqueeze(1)
+        outward_vel = torch.sum(self.root_states[:, 7:9] * radial_dir, dim=1)
+        _, _, is_walking = self._command_mode()
+        return torch.clamp(outward_vel, min=0.) * is_walking * (~self.is_flat_terrain)
+
+    def _reward_stair_height_progress(self):
+        # rewards vertical velocity in the direction that actually engages the tile (descending a
+        # "stairs up" peak, climbing out of a "stairs down" pit - sign of env_origins[:,2] tells
+        # which), capped at a plausible deliberate climbing pace and gated on having at least one
+        # foot in contact. Both guards exist because raw/uncapped vertical speed is trivially
+        # maximized by an uncontrolled fall (gravity alone beats any real gait on a "stairs up"
+        # tile), which would make this reward actively encourage tumbling instead of climbing.
+        max_speed = 0.3 # [m/s], generous for a deliberate step-by-step pace; faster earns no extra
+        engage_dir = torch.sign(self.env_origins[:, 2])
+        engage_vel = -engage_dir * self.root_states[:, 9]
+        any_contact = torch.any(self.contact_filt, dim=1)
+        _, _, is_walking = self._command_mode()
+        return torch.clamp(engage_vel, min=0., max=max_speed) * any_contact * is_walking * (~self.is_flat_terrain)
+
     def _reward_stand_still_contact(self):
         # bonus for keeping all 4 feet planted while standing still, on any terrain
         is_standing_still, _, _ = self._command_mode()

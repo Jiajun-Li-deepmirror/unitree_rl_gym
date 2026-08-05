@@ -135,12 +135,14 @@ class GO2StairsCfg( LeggedRobotCfg ):
             feet_stumble = -1.
             feet_edge = -1.
 
-            # rotate-in-place/walk only (see _command_mode gating in go2_stairs_env.py)
             gait_phase = 0.4
-            # rotate-in-place/walk + flat terrain only (feet_swing_height_target isn't meaningful on stairs)
             feet_swing_height = -10.0
 
-            # stand-still only, any terrain
+            stair_progress = 1.0
+            # vertical-engagement counterpart to stair_progress; capped + contact-gated in
+            # go2_stairs_env.py so it can't be maximized by just falling off the tile's peak
+            stair_height_progress = 0.0
+
             stand_still_contact = 0.2
 
     class height_encoder:
