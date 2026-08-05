@@ -40,8 +40,15 @@ class GO2StairsCfg( LeggedRobotCfg ):
         slope_treshold = 0.3
         measured_points_x = MEASURED_POINTS_X
         measured_points_y = MEASURED_POINTS_Y
+        num_rows = 20 # number of terrain rows (curriculum levels)
+        num_cols = 10 # number of terrain cols (types)
         # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, flat]
         terrain_proportions = [0.0, 0.0, 0.4, 0.4, 0.0, 0.2]
+        # step_height = stair_height_base + stair_height_scale * difficulty, difficulty = row/num_rows
+        # (so difficulty never reaches a full 1.0 - the hardest row is row num_rows-1)
+        stair_height_base = 0.05 # [m], step height at row 0 -> 5cm
+        stair_height_scale = 0.2778 # [m], step height at row 9 (difficulty 0.9) -> 30cm
+        # stair_height_scale = 0.18
 
         # single continuously-ascending U-shaped staircase, used by play_keyboard.py
         u_shape_playground = False
@@ -155,7 +162,7 @@ class GO2StairsCfg( LeggedRobotCfg ):
         max_grad_norm = 1.0
         num_iterations = 3000
         save_interval = 100
-        num_envs = 64             # much smaller than the teacher's - per-env camera rendering is expensive
+        num_envs = 512             # much smaller than the teacher's - per-env camera rendering is expensive
         camera_scale = 0.1        # overrides cfg.camera.scale during student training (finer than play_keyboard's 0.5)
         experiment_name = 'stairs_go2_student'
 
