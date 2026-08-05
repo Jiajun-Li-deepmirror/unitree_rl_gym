@@ -71,14 +71,14 @@ class GO2StairsCfg( LeggedRobotCfg ):
     class commands( LeggedRobotCfg.commands ):
         curriculum = False
         heading_command = False
-        command_proportions = [0.0, 0.0, 1.0]
+        command_proportions = [0.15, 0.15, .7]
         class command_curriculum:
-            enabled = True            # set False to keep command_proportions fixed (e.g. for play/eval)
+            enabled = False            # set False to keep command_proportions fixed (e.g. for play/eval)
             increment = 0.05          # added to the stand & rotate weights each interval below
             increment_interval = 2000 # [iterations]
             num_steps_per_env = 24    # must match GO2StairsCfgPPO.runner.num_steps_per_env
         class ranges( LeggedRobotCfg.commands.ranges ):
-            lin_vel_x = [0.0, 1.2]     # min max [m/s], walk mode only
+            lin_vel_x = [0.1, 1.2]     # min max [m/s], walk mode only; kept >= VEL_DEADZONE (go2_stairs_env.py)
             lin_vel_y = [0.0, 0.0]     # min max [m/s], walk mode only
             ang_vel_yaw = [-0.75, 0.75] # min max [rad/s]; rotate-in-place mode, and the clip bound for walk mode's heading-derived vyaw
             heading = [-3.14, 3.14]    # walk mode only
@@ -151,4 +151,4 @@ class GO2StairsCfgPPO( LeggedRobotCfgPPO ):
         policy_class_name = 'ActorCriticHeightEncoder'
         run_name = ''
         experiment_name = 'stairs_go2'
-        max_iterations = 6000 # must match cfg.commands.command_curriculum's increment schedule
+        max_iterations = 4000 # must match cfg.commands.command_curriculum's increment schedule

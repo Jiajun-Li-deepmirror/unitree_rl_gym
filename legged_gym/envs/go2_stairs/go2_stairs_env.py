@@ -11,6 +11,11 @@ from legged_gym.envs.base.legged_robot import LeggedRobot
 from legged_gym.utils.terrain import Terrain
 from legged_gym.utils.math import quat_apply_yaw, wrap_to_pi
 
+# below this magnitude, vx/vyaw are snapped to exactly 0 wherever self.commands is written, so the
+# policy never observes an ambiguous near-zero-but-nonzero command; play_keyboard.py applies the
+# same threshold to its live keyboard-driven commands
+VEL_DEADZONE = 0.1
+
 
 class GO2Stairs(LeggedRobot):
     """ GO2 trained on stairs terrain: trimesh generation + height-scan sensing. """
@@ -287,6 +292,7 @@ class GO2Stairs(LeggedRobot):
                 0.5 * wrap_to_pi(self.commands[:, 3] - heading),
                 self.command_ranges["ang_vel_yaw"][0], self.command_ranges["ang_vel_yaw"][1],
             )
+            target_ang_vel[torch.abs(target_ang_vel) < VEL_DEADZONE] = 0.
             self.commands[is_walking, 2] = target_ang_vel[is_walking]
         return result
 
@@ -330,15 +336,19 @@ class GO2Stairs(LeggedRobot):
         if len(rotate_ids) > 0:
             self.commands[rotate_ids, 0] = 0.
             self.commands[rotate_ids, 1] = 0.
-            self.commands[rotate_ids, 2] = torch_rand_float(
+            vyaw = torch_rand_float(
                 self.command_ranges["ang_vel_yaw"][0], self.command_ranges["ang_vel_yaw"][1],
                 (len(rotate_ids), 1), device=self.device).squeeze(1)
+            vyaw[torch.abs(vyaw) < VEL_DEADZONE] = 0.
+            self.commands[rotate_ids, 2] = vyaw
             self.commands[rotate_ids, 3] = 0.
 
         if len(walk_ids) > 0:
-            self.commands[walk_ids, 0] = torch_rand_float(
+            vx = torch_rand_float(
                 self.command_ranges["lin_vel_x"][0], self.command_ranges["lin_vel_x"][1],
                 (len(walk_ids), 1), device=self.device).squeeze(1)
+            vx[torch.abs(vx) < VEL_DEADZONE] = 0.
+            self.commands[walk_ids, 0] = vx
             self.commands[walk_ids, 1] = torch_rand_float(
                 self.command_ranges["lin_vel_y"][0], self.command_ranges["lin_vel_y"][1],
                 (len(walk_ids), 1), device=self.device).squeeze(1)
