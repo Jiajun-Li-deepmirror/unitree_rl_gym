@@ -15,10 +15,10 @@ class GO2StairsCfg( LeggedRobotCfg ):
     class init_state( LeggedRobotCfg.init_state ):
         pos = [0.0, 0.0, 0.42] # x,y,z [m]
         default_joint_angles = { # = target angles [rad] when action = 0.0
-            'FL_hip_joint': 0.1,   # [rad]
-            'RL_hip_joint': 0.1,   # [rad]
-            'FR_hip_joint': -0.1 ,  # [rad]
-            'RR_hip_joint': -0.1,   # [rad]
+            'FL_hip_joint': 0.,   # [rad]
+            'RL_hip_joint': 0.,   # [rad]
+            'FR_hip_joint': 0. ,  # [rad]
+            'RR_hip_joint': 0.,   # [rad]
 
             'FL_thigh_joint': 0.8,     # [rad]
             'RL_thigh_joint': 1.,   # [rad]
@@ -115,6 +115,7 @@ class GO2StairsCfg( LeggedRobotCfg ):
             lin_vel_z = -1.0
             ang_vel_xy = -0.05
             orientation = -1.
+            base_height = -1.0 # flat terrain only (see is_flat_terrain gating in go2_stairs_env.py)
             dof_acc = -2.5e-7
             collision = -10.
             action_rate = -0.1

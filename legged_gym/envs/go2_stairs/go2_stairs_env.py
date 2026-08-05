@@ -554,6 +554,13 @@ class GO2Stairs(LeggedRobot):
         rew[~self.is_flat_terrain] = 0.
         return rew
 
+    def _reward_base_height(self):
+        # only enforced on flat ground; absolute world-z height isn't a meaningful target once
+        # the terrain under the robot isn't at z=0 (stairs), so this is left off there
+        rew = torch.square(self.root_states[:, 2] - self.cfg.rewards.base_height_target)
+        rew[~self.is_flat_terrain] = 0.
+        return rew
+
     def _reward_action_rate(self):
         # aligned with reference: L2 norm of the action delta, not sum of squares (base class default)
         return torch.norm(self.last_actions - self.actions, dim=1)
