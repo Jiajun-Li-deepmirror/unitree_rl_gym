@@ -432,9 +432,13 @@ class GO2Stairs(LeggedRobot):
             self.gym.poll_viewer_events(self.viewer)
 
     def _init_camera(self):
-        """ Mounts a depth camera on env 0 only - interactive use in play_keyboard.py, never
-            enabled during training (cfg.camera.use_camera is always False otherwise).
+        """ Mounts a depth camera on every env, via the GPU-tensor path (cheap enough to read
+            every env every step - see get_camera_depth_images, used by train_student.py).
+            Never enabled during PPO training (cfg.camera.use_camera is always False there);
+            play_keyboard.py only looks at env 0's image (get_camera_depth_image, singular).
         """
+        self.camera_handles = []
+        self.camera_tensors = []
         self.camera_handle = None
         if not hasattr(self.cfg, "camera") or not self.cfg.camera.use_camera:
             return
@@ -445,21 +449,39 @@ class GO2Stairs(LeggedRobot):
         camera_props.horizontal_fov = cam_cfg.horizontal_fov
         camera_props.near_plane = cam_cfg.near_plane
         camera_props.far_plane = cam_cfg.far_plane
-        self.camera_handle = self.gym.create_camera_sensor(self.envs[0], camera_props)
-        body_handle = self.gym.find_actor_rigid_body_handle(self.envs[0], self.actor_handles[0], cam_cfg.mount_body)
+        # GPU tensor path - lets get_camera_depth_images read every env's image without a
+        # per-env CPU copy (gym.get_camera_image); needs BaseTask to have kept a real
+        # graphics_device_id even when headless, see base_task.py
+        camera_props.enable_tensors = True
         local_transform = gymapi.Transform()
         local_transform.p = gymapi.Vec3(*cam_cfg.mount_pos)
         # identity attach looks along the body's local +x; pitching around local y tilts the view down
         local_transform.r = gymapi.Quat.from_axis_angle(gymapi.Vec3(0, 1, 0), cam_cfg.mount_pitch)
-        self.gym.attach_camera_to_body(self.camera_handle, self.envs[0], body_handle, local_transform, gymapi.FOLLOW_TRANSFORM)
+        for i in range(self.num_envs):
+            camera_handle = self.gym.create_camera_sensor(self.envs[i], camera_props)
+            body_handle = self.gym.find_actor_rigid_body_handle(self.envs[i], self.actor_handles[i], cam_cfg.mount_body)
+            self.gym.attach_camera_to_body(camera_handle, self.envs[i], body_handle, local_transform, gymapi.FOLLOW_TRANSFORM)
+            camera_tensor = self.gym.get_camera_image_gpu_tensor(self.sim, self.envs[i], camera_handle, gymapi.IMAGE_DEPTH)
+            self.camera_handles.append(camera_handle)
+            self.camera_tensors.append(gymtorch.wrap_tensor(camera_tensor))
+        self.camera_handle = self.camera_handles[0]
 
-    def get_camera_depth_image(self):
-        """ Renders and returns the depth image as a (height, width) array of positive meters
-            (IMAGE_DEPTH itself returns negative distances). Only valid when use_camera is True.
+    def get_camera_depth_images(self):
+        """ Renders and returns every env's depth image, stacked as (num_envs, height, width),
+            in positive meters (IMAGE_DEPTH itself returns negative distances). Only valid when
+            use_camera is True. This is the batched path train_student.py uses every step.
         """
         self.gym.render_all_camera_sensors(self.sim)
-        depth = self.gym.get_camera_image(self.sim, self.envs[0], self.camera_handle, gymapi.IMAGE_DEPTH)
-        return -depth
+        self.gym.start_access_image_tensors(self.sim)
+        depth = -torch.stack(self.camera_tensors, dim=0)
+        self.gym.end_access_image_tensors(self.sim)
+        return depth
+
+    def get_camera_depth_image(self):
+        """ Same as get_camera_depth_images, but only env 0's image, as a numpy array - what
+            play_keyboard.py's single-robot depth window expects.
+        """
+        return self.get_camera_depth_images()[0].cpu().numpy()
 
     def _draw_camera_fov(self, color=(1.0, 0.6, 0.0)):
         """ Draws a small wireframe pyramid from the camera's position, sized to its actual

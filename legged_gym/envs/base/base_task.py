@@ -23,9 +23,11 @@ class BaseTask():
         else:
             self.device = 'cpu'
 
-        # graphics device for rendering, -1 for no rendering
+        # graphics device for rendering, -1 for no rendering. A camera sensor's GPU tensor path
+        # (see GO2Stairs.get_camera_depth_images) still needs a live graphics context even when
+        # running headless, so keep one whenever the env config asks for a camera.
         self.graphics_device_id = self.sim_device_id
-        if self.headless == True:
+        if self.headless and not (hasattr(cfg, "camera") and cfg.camera.use_camera):
             self.graphics_device_id = -1
 
         self.num_envs = cfg.env.num_envs

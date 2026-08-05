@@ -142,6 +142,23 @@ class GO2StairsCfg( LeggedRobotCfg ):
         hidden_dims = [128, 64]
         latent_dim = 32
 
+    class student:
+        # depth-camera + GRU student policy, distilled from the height-scan teacher via DAgger
+        # (see legged_gym/algorithms/student_policy.py and legged_gym/scripts/train_student.py)
+        cnn_channels = [16, 32, 32]
+        cnn_feature_dim = 128
+        gru_hidden_dim = 128
+        actor_hidden_dims = [256, 256]
+        chunk_len = 24            # truncated-BPTT window length [env steps]
+        learning_rate = 1.0e-3
+        lr_warmup_iters = 100     # linear LR warmup, so a random policy driving early rollouts doesn't blow up
+        max_grad_norm = 1.0
+        num_iterations = 3000
+        save_interval = 100
+        num_envs = 64             # much smaller than the teacher's - per-env camera rendering is expensive
+        camera_scale = 0.1        # overrides cfg.camera.scale during student training (finer than play_keyboard's 0.5)
+        experiment_name = 'stairs_go2_student'
+
 class GO2StairsCfgPPO( LeggedRobotCfgPPO ):
     # trains the height-scan encoder jointly with the policy (see legged_gym/algorithms/)
     runner_class_name = 'HeightEncoderOnPolicyRunner'
