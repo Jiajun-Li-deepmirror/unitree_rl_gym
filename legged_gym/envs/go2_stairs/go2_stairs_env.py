@@ -175,14 +175,13 @@ class GO2Stairs(LeggedRobot):
         self.is_flat_terrain = (choice >= flat_lower) & (choice < flat_upper)
 
     def _update_terrain_curriculum(self, env_ids):
-        """ Moves each env to a harder terrain row if it walked past half the tile, or an easier
-            one if it fell well short of its commanded distance - standard legged_gym game-inspired
-            terrain curriculum.
-        """
         if not self.init_done:
             return
         distance = torch.norm(self.root_states[env_ids, :2] - self.env_origins[env_ids, :2], dim=1)
-        move_up = distance > self.terrain.env_length / 2
+        height_progress = torch.abs(self.root_states[env_ids, 2] - self.env_origins[env_ids, 2])
+        full_height = torch.abs(self.env_origins[env_ids, 2])
+        cleared_height = self.is_flat_terrain[env_ids] | (height_progress > 0.8 * full_height)
+        move_up = (distance > self.terrain.env_length / 2) & cleared_height
         move_down = (distance < torch.norm(self.commands[env_ids, :2], dim=1) * self.max_episode_length_s * 0.5) & ~move_up
         self.terrain_levels[env_ids] += 1 * move_up - 1 * move_down
         self.terrain_levels[env_ids] = torch.where(
