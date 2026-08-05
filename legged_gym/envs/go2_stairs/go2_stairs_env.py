@@ -180,9 +180,10 @@ class GO2Stairs(LeggedRobot):
         distance = torch.norm(self.root_states[env_ids, :2] - self.env_origins[env_ids, :2], dim=1)
         height_progress = torch.abs(self.root_states[env_ids, 2] - self.env_origins[env_ids, 2])
         full_height = torch.abs(self.env_origins[env_ids, 2])
-        cleared_height = self.is_flat_terrain[env_ids] | (height_progress > 0.8 * full_height)
-        move_up = (distance > self.terrain.env_length / 2) & cleared_height
-        move_down = (distance < torch.norm(self.commands[env_ids, :2], dim=1) * self.max_episode_length_s * 0.5) & ~move_up
+        not_flat = ~self.is_flat_terrain[env_ids]
+        cleared_height = height_progress > 0.8 * full_height
+        move_up = (distance > self.terrain.env_length / 2) & cleared_height & not_flat
+        move_down = (distance < torch.norm(self.commands[env_ids, :2], dim=1) * self.max_episode_length_s * 0.5) & ~move_up & not_flat
         self.terrain_levels[env_ids] += 1 * move_up - 1 * move_down
         self.terrain_levels[env_ids] = torch.where(
             self.terrain_levels[env_ids] >= self.max_terrain_level,
@@ -215,7 +216,8 @@ class GO2Stairs(LeggedRobot):
             self._update_terrain_curriculum(env_ids)
         super().reset_idx(env_ids)
         if run_curriculum:
-            self.extras["episode"]["terrain_level"] = torch.mean(self.terrain_levels.float())
+            stairs_levels = self.terrain_levels[~self.is_flat_terrain]
+            self.extras["episode"]["terrain_level"] = torch.mean(stairs_levels.float())
 
     def _init_height_points(self):
         y = torch.tensor(self.cfg.terrain.measured_points_y, device=self.device, requires_grad=False)
