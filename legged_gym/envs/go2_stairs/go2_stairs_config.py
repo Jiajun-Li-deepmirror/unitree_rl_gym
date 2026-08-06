@@ -138,10 +138,10 @@ class GO2StairsCfg( LeggedRobotCfg ):
             gait_phase = 0.4
             feet_swing_height = -10.0
 
-            stair_progress = 1.0
+            stair_progress = 0.0
             # vertical-engagement counterpart to stair_progress; capped + contact-gated in
             # go2_stairs_env.py so it can't be maximized by just falling off the tile's peak
-            stair_height_progress = 0.0
+            stair_height_progress = 1.0
 
             stand_still_contact = 0.2
 
@@ -164,7 +164,7 @@ class GO2StairsCfg( LeggedRobotCfg ):
         max_grad_norm = 1.0
         num_iterations = 3000
         save_interval = 100
-        num_envs = 512             # much smaller than the teacher's - per-env camera rendering is expensive
+        num_envs = 256             # much smaller than the teacher's - per-env camera rendering is expensive
         camera_scale = 0.1        # overrides cfg.camera.scale during student training (finer than play_keyboard's 0.5)
         experiment_name = 'stairs_go2_student'
 
