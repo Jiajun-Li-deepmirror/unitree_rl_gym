@@ -7,6 +7,7 @@ from isaacgym import gymapi
 from legged_gym import LEGGED_GYM_ROOT_DIR
 from legged_gym.envs import *
 from legged_gym.utils import get_args, get_load_path, task_registry
+from legged_gym.utils.math import wrap_to_pi
 
 import cv2
 import numpy as np
@@ -98,6 +99,10 @@ def play(args):
         cv2.namedWindow(DEPTH_WINDOW_NAME, cv2.WINDOW_NORMAL)
 
     commands = torch.zeros(3, dtype=torch.float, device=env.device)
+    # GO2Stairs derives vyaw from this every step while walking (vx != 0) instead of using
+    # commands[:,2] directly - see _post_physics_step_callback's heading tracking - so vyaw key
+    # presses are integrated into a heading target here rather than written straight to vyaw
+    heading_target = 0.0
     follow_camera = True
 
     # live strip chart: vx/vyaw command vs. actual, scrolling over the last PLOT_WINDOW_S seconds
@@ -160,11 +165,26 @@ def play(args):
                     elif evt.action == "reset":
                         env.reset_idx(torch.arange(env.num_envs, device=env.device))
                         commands[:] = 0.
+                        heading_target = 0.0
 
                 # same dead zone _resample_commands uses, so keyboard commands match the training distribution
-                env.commands[:, 0] = commands[0] if abs(commands[0]) > VEL_DEADZONE else 0.0
+                vx = commands[0].item() if abs(commands[0]) > VEL_DEADZONE else 0.0
+                vyaw = commands[2].item() if abs(commands[2]) > VEL_DEADZONE else 0.0
+                env.commands[:, 0] = vx
                 env.commands[:, 1] = commands[1]
-                env.commands[:, 2] = commands[2] if abs(commands[2]) > VEL_DEADZONE else 0.0
+                # always integrated, so heading_target stays consistent with the vyaw key presses
+                # regardless of mode - it's what vx != 0 needs to start from the right place
+                heading_target = wrap_to_pi(heading_target + vyaw * env.dt)
+                if vx != 0.0:
+                    # walking: GO2Stairs derives vyaw itself every step by steering toward
+                    # commands[:,3] (see _post_physics_step_callback) - writing commands[:,2]
+                    # directly here would just get overwritten and ignored
+                    env.commands[:, 2] = 0.0
+                    env.commands[:, 3] = heading_target
+                else:
+                    # standing / rotating in place: GO2Stairs never touches commands[:,2] here,
+                    # so it must be set directly
+                    env.commands[:, 2] = vyaw
 
             actions = policy(obs.detach())
             obs, _, rews, dones, infos = env.step(actions.detach())

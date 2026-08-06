@@ -40,15 +40,18 @@ class GO2StairsCfg( LeggedRobotCfg ):
         slope_treshold = 0.3
         measured_points_x = MEASURED_POINTS_X
         measured_points_y = MEASURED_POINTS_Y
-        num_rows = 20 # number of terrain rows (curriculum levels)
-        num_cols = 10 # number of terrain cols (types)
-        # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, flat]
-        terrain_proportions = [0.0, 0.0, 0.4, 0.4, 0.0, 0.2]
+        num_rows = 10 # number of terrain rows (curriculum levels)
+        num_cols = 20 # number of terrain cols (types)
+        # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, flat, u_shape]
+        # u_shape reuses the u_shape block below for its footprint (num_steps/step_width/etc.),
+        # but its step height still scales with difficulty like stairs up/down, not the fixed
+        # cfg.u_shape.step_height that u_shape_playground (play_keyboard.py) uses
+        terrain_proportions = [0.0, 0.0, 0.4, 0.4, 0.0, 0.2, 0.0]
         # step_height = stair_height_base + stair_height_scale * difficulty, difficulty = row/num_rows
         # (so difficulty never reaches a full 1.0 - the hardest row is row num_rows-1)
         stair_height_base = 0.05 # [m], step height at row 0 -> 5cm
-        stair_height_scale = 0.2778 # [m], step height at row 9 (difficulty 0.9) -> 30cm
-        # stair_height_scale = 0.18
+        # stair_height_scale = 0.2778 # [m], step height at row 9 (difficulty 0.9) -> 30cm
+        stair_height_scale = 0.18
 
         # single continuously-ascending U-shaped staircase, used by play_keyboard.py
         u_shape_playground = False
@@ -144,9 +147,7 @@ class GO2StairsCfg( LeggedRobotCfg ):
             feet_swing_height = -10.0
 
             stair_progress = 0.0
-            # vertical-engagement counterpart to stair_progress; capped + contact-gated in
-            # go2_stairs_env.py so it can't be maximized by just falling off the tile's peak
-            stair_height_progress = 1.5
+            # stair_height_progress = 1.5
 
             stand_still_contact = 0.2
 

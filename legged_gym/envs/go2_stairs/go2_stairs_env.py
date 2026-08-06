@@ -183,16 +183,18 @@ class GO2Stairs(LeggedRobot):
         self._init_flat_terrain_mask()
 
     def _init_flat_terrain_mask(self):
-        """ Marks which envs sit on the dedicated flat column - terrain_proportions' last entry,
-            a genuinely flat terrain type (see Terrain.make_terrain in legged_gym/utils/terrain.py) -
+        """ Marks which envs sit on the dedicated flat column - terrain_proportions[5], a
+            genuinely flat terrain type (see Terrain.make_terrain in legged_gym/utils/terrain.py) -
             by replicating the `choice` comparison Terrain.curiculum() used to pick that column's
             terrain. Used by _reward_lin_vel_z/_reward_orientation to only apply their full penalty
             there.
         """
         choice = self.terrain_types.float() / self.cfg.terrain.num_cols + 0.001
         proportions = self.cfg.terrain.terrain_proportions
-        flat_lower = sum(proportions[:-1]) # cumulative share before the flat slot
-        flat_upper = sum(proportions) # flat is always the last configured terrain type
+        # terrain_proportions schema: [smooth slope, rough slope, stairs up, stairs down,
+        # discrete, flat, u_shape] - flat is index 5, not necessarily the last entry
+        flat_lower = sum(proportions[:5]) # cumulative share before the flat slot
+        flat_upper = sum(proportions[:6]) # cumulative share through the flat slot
         self.is_flat_terrain = (choice >= flat_lower) & (choice < flat_upper)
 
     def _update_terrain_curriculum(self, env_ids):

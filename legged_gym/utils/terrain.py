@@ -108,8 +108,16 @@ class Terrain:
         elif choice < self.proportions[5]:
             pass # flat ground - terrain.height_field_raw is already all zeros, nothing to do
         elif choice < self.proportions[6]:
-            terrain_utils.stepping_stones_terrain(terrain, stone_size=stepping_stones_size, stone_distance=stone_distance, max_height=0., platform_size=4.)
+            # same switchback shape as GO2Stairs._build_u_shape_terrain (play_keyboard.py's
+            # standalone showcase terrain), just fit within this one curriculum tile instead of
+            # being its own map, and with step_height scaled by difficulty like the up/down
+            # stairs branch above (not the playground's own fixed cfg.u_shape.step_height)
+            u_shape_stairs_terrain(terrain, num_steps=self.cfg.u_shape.num_steps, step_width=self.cfg.u_shape.step_width,
+                                    step_height=abs(step_height), flight_width=self.cfg.u_shape.flight_width,
+                                    platform_size=self.cfg.u_shape.platform_size, top_platform_size=self.cfg.u_shape.top_platform_size)
         elif choice < self.proportions[7]:
+            terrain_utils.stepping_stones_terrain(terrain, stone_size=stepping_stones_size, stone_distance=stone_distance, max_height=0., platform_size=4.)
+        elif choice < self.proportions[8]:
             gap_terrain(terrain, gap_size=gap_size, platform_size=3.)
         else:
             pit_terrain(terrain, depth=pit_depth, platform_size=4.)
@@ -157,3 +165,49 @@ def pit_terrain(terrain, depth, platform_size=1.):
     y1 = terrain.width // 2 - platform_size
     y2 = terrain.width // 2 + platform_size
     terrain.height_field_raw[x1:x2, y1:y2] = -depth
+
+def u_shape_stairs_terrain(terrain, num_steps, step_width, step_height, flight_width, platform_size, top_platform_size):
+    """ Switchback staircase, centered within this one tile: flight 1 climbs in +x, turns at a
+        landing, flight 2 climbs back in -x to a top platform - the same shape as
+        GO2Stairs._build_u_shape_terrain (play_keyboard.py's standalone showcase terrain), just
+        sized to fit inside a single curriculum tile instead of being its own map. The tile
+        (terrain.width x terrain.length) must be big enough to contain the footprint, or this
+        silently gets clipped by the array bounds.
+    """
+    horizontal_scale = terrain.horizontal_scale
+    vertical_scale = terrain.vertical_scale
+    step_width_px = max(round(step_width / horizontal_scale), 1)
+    step_height_px = max(round(step_height / vertical_scale), 1)
+    flight_width_px = max(round(flight_width / horizontal_scale), 1)
+    platform_px = max(round(platform_size / horizontal_scale), 1)
+    top_platform_px = max(round(top_platform_size / horizontal_scale), 1)
+    run_up_px = max(platform_px, top_platform_px)
+
+    x_span = run_up_px + num_steps * step_width_px + platform_px
+    y_span = 2 * flight_width_px
+    x_off = max((terrain.width - x_span) // 2, 0)
+    y_off = max((terrain.length - y_span) // 2, 0)
+
+    y0 = y_off
+    y1 = y0 + flight_width_px
+
+    x = x_off + run_up_px
+    height = 0
+    for _ in range(num_steps):
+        x_end = x + step_width_px
+        height += step_height_px
+        terrain.height_field_raw[x:x_end, y0:y0 + flight_width_px] = height
+        x = x_end
+
+    landing_start = x
+    terrain.height_field_raw[landing_start:landing_start + platform_px, y0:y0 + y_span] = height
+
+    x = landing_start
+    for _ in range(num_steps):
+        x_start = x - step_width_px
+        height += step_height_px
+        terrain.height_field_raw[x_start:x, y1:y1 + flight_width_px] = height
+        x = x_start
+
+    terrain.height_field_raw[x - top_platform_px:x, y1:y1 + flight_width_px] = height
+    return terrain
