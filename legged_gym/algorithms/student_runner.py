@@ -5,18 +5,23 @@ import torch
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 
-from rsl_rl.runners import OnPolicyRunner
-
+from .height_encoder_runner import HeightEncoderOnPolicyRunner
 from .student_policy import StudentDepthPolicy
 from .student_distillation import StudentDistillation
 
 
-class StudentDistillationRunner(OnPolicyRunner):
-    """ Distills a depth-camera student policy from the frozen teacher. Calls
-        OnPolicyRunner.__init__ verbatim to build/hold the teacher (actor_critic + PPO), so
+class StudentDistillationRunner(HeightEncoderOnPolicyRunner):
+    """ Distills a depth-camera student policy from the frozen teacher. Subclasses
+        HeightEncoderOnPolicyRunner (not the bare rsl_rl OnPolicyRunner) because the go2_stairs
+        teacher this student imitates is an ActorCriticHeightEncoder: HeightEncoderOnPolicyRunner's
+        __init__ contains its own eval(policy_class_name) call in *its own module's* namespace,
+        which is where ActorCriticHeightEncoder is actually importable from - eval() resolves
+        against the globals of the module the call is textually written in, not the caller's, so
+        subclassing the bare OnPolicyRunner here would NameError trying to resolve it.
+        super().__init__() builds/holds the teacher (actor_critic + PPO) exactly as before, so
         `train_cfg.runner.resume=True` + task_registry.make_alg_runner's runner.load(resume_path)
-        keeps loading the teacher checkpoint unmodified - then bolts the student network and its
-        own algorithm object on top. rsl_rl itself is never edited: this class and
+        keeps loading the teacher checkpoint unmodified - then this class bolts the student
+        network and its own algorithm object on top. rsl_rl itself is never edited: this class and
         StudentDistillation (the student-side analogue of rsl_rl.algorithms.PPO) both live in
         legged_gym/algorithms/, following the precedent set by
         ActorCriticHeightEncoder/HeightEncoderOnPolicyRunner.

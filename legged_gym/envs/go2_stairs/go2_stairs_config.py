@@ -56,9 +56,13 @@ class GO2StairsCfg( LeggedRobotCfg ):
             num_steps = 12       # steps per flight
             step_width = 0.25     # [m] depth of each step
             step_height = 0.2   # [m] rise of each step
-            flight_width = 2.0   # [m] width of each flight
-            platform_size = 1.0  # [m] flat spawn run-up / mid-turn landing length
+            flight_width = 1.4   # [m] width of each flight
+            platform_size = 1.5  # [m] flat spawn run-up / mid-turn landing length
             top_platform_size = 1.5  # [m] flat landing at the top of flight 2
+            # guard rails on 3 of the 4 footprint sides (left, right, far/landing end) - the
+            # near-x entrance stays open so the robot can still walk onto flight 1
+            wall_height = 1.0      # [m] tall enough the robot can't climb/jump over
+            wall_thickness = 0.1   # [m]
 
     class camera:
         use_camera = False

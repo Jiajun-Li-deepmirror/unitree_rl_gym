@@ -90,7 +90,28 @@ class GO2Stairs(LeggedRobot):
             x = x_start
 
         # top platform: flat landing at the final height, carved out of the run-up region
-        height_field_raw[x - top_platform_px:x, y1:y1 + flight_width_px] = height
+        top_platform_start = x - top_platform_px
+        height_field_raw[top_platform_start:x, y1:y1 + flight_width_px] = height
+
+        # guard rails on 3 of the 4 footprint sides - only the near-x entrance, in flight 1's
+        # lane (y0), where the robot spawns and walks onto flight 1, is left open, so
+        # keyboard-driven play can't wander off the stairs' side edges or off the landing's far
+        # edge and fall. Added on top of the existing local height (+=, not =) - flight/landing
+        # height varies along these strips (0 in the run-up, up to the full climb height near the
+        # top platform), so a fixed absolute height would end up buried below the tread instead
+        # of rising above it.
+        wall_height_px = max(round(u_cfg.wall_height / vertical_scale), 1)
+        wall_thickness_px = max(round(u_cfg.wall_thickness / horizontal_scale), 1)
+        far_x = border_px + x_extent
+        height_field_raw[border_px:far_x, y0:y0 + wall_thickness_px] += wall_height_px  # left wall
+        height_field_raw[border_px:far_x, y0 + y_extent - wall_thickness_px:y0 + y_extent] += wall_height_px  # right wall
+        height_field_raw[far_x - wall_thickness_px:far_x, y0:y0 + y_extent] += wall_height_px  # far wall
+        # the near-x face is only an open entrance in flight 1's lane (y0) - in flight 2's lane
+        # (y1) that same x position is the top platform's own near edge (the highest, most
+        # dangerous drop on the whole terrain whenever top_platform_size >= platform_size, since
+        # then run_up_px == top_platform_px and this edge lands exactly on the entrance row), so
+        # it gets a wall too
+        height_field_raw[top_platform_start:top_platform_start + wall_thickness_px, y1:y1 + flight_width_px] += wall_height_px
 
         vertices, triangles = terrain_utils.convert_heightfield_to_trimesh(
             height_field_raw, horizontal_scale, vertical_scale, cfg.slope_treshold)
@@ -196,12 +217,22 @@ class GO2Stairs(LeggedRobot):
         """ Same as the base class, but with a uniformly random initial yaw instead of the fixed
             orientation from init_state.rot - stairs are approached from a random heading during
             training so the policy doesn't overfit to always starting square with the terrain.
-            Skipped on the u_shape_playground: that terrain has one fixed climb direction, so
-            random spawn yaw would just point the robot away from the staircase.
+            Skipped on the u_shape_playground: that terrain has one fixed climb direction (random
+            yaw would just point the robot away from the staircase), and the spawn point is kept
+            exactly fixed too - it's a narrow 1.4m-wide corridor, so the base class's usual +-1m
+            xy jitter (added whenever custom_origins is True) could spawn the robot inside a wall;
+            interactive testing also benefits from a deterministic, repeatable starting point.
         """
-        super()._reset_root_states(env_ids)
         if self.cfg.terrain.u_shape_playground:
+            self.root_states[env_ids] = self.base_init_state
+            self.root_states[env_ids, :3] += self.env_origins[env_ids]
+            self.root_states[env_ids, 7:13] = torch_rand_float(-0.5, 0.5, (len(env_ids), 6), device=self.device)
+            env_ids_int32 = env_ids.to(dtype=torch.int32)
+            self.gym.set_actor_root_state_tensor_indexed(self.sim,
+                                                          gymtorch.unwrap_tensor(self.root_states),
+                                                          gymtorch.unwrap_tensor(env_ids_int32), len(env_ids_int32))
             return
+        super()._reset_root_states(env_ids)
         yaw = torch_rand_float(-np.pi, np.pi, (len(env_ids), 1), device=self.device).squeeze(1)
         zeros = torch.zeros_like(yaw)
         self.root_states[env_ids, 3:7] = quat_from_euler_xyz(zeros, zeros, yaw)
