@@ -121,6 +121,7 @@ class GO2StairsCfg( LeggedRobotCfg ):
         edge_height_threshold = 0.03 # [m], min height jump between neighboring terrain cells to count as a stair edge
         cycle_time = 0.5 # [s], gait phase cycle period used for the obs sin/cos phase encoding
         feet_swing_height_target = 0.10 # [m], target swing-foot clearance above the terrain while rotating in place
+        stair_height_progress_heading_sigma = 0.16 # [rad^2], exp(-error^2/sigma) falloff for _reward_stair_height_progress (0.4rad error -> ~0.37x reward)
         class scales( LeggedRobotCfg.rewards.scales ):
             # regularization
             lin_vel_z = -1.0
@@ -145,7 +146,7 @@ class GO2StairsCfg( LeggedRobotCfg ):
             stair_progress = 0.0
             # vertical-engagement counterpart to stair_progress; capped + contact-gated in
             # go2_stairs_env.py so it can't be maximized by just falling off the tile's peak
-            stair_height_progress = 1.0
+            stair_height_progress = 1.5
 
             stand_still_contact = 0.2
 

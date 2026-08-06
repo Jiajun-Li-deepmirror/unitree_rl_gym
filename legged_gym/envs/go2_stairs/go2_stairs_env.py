@@ -689,18 +689,23 @@ class GO2Stairs(LeggedRobot):
         return torch.clamp(outward_vel, min=0.) * is_walking * (~self.is_flat_terrain)
 
     def _reward_stair_height_progress(self):
-        # rewards vertical velocity in the direction that actually engages the tile (descending a
-        # "stairs up" peak, climbing out of a "stairs down" pit - sign of env_origins[:,2] tells
-        # which), capped at a plausible deliberate climbing pace and gated on having at least one
-        # foot in contact. Both guards exist because raw/uncapped vertical speed is trivially
-        # maximized by an uncontrolled fall (gravity alone beats any real gait on a "stairs up"
-        # tile), which would make this reward actively encourage tumbling instead of climbing.
+        # scaled by how closely the robot is facing the commanded climb direction - a smooth
+        # exp(-error^2/sigma) falloff (same shape as tracking_lin_vel/tracking_ang_vel), not a
+        # hard cutoff, so facing slightly off just tapers the reward instead of zeroing it
+        # outright; otherwise this would reward any positive engagement velocity regardless of
+        # heading, which a robot rotating or drifting sideways on the stairs could still collect
         max_speed = 0.3 # [m/s], generous for a deliberate step-by-step pace; faster earns no extra
         engage_dir = torch.sign(self.env_origins[:, 2])
         engage_vel = -engage_dir * self.root_states[:, 9]
         any_contact = torch.any(self.contact_filt, dim=1)
         _, _, is_walking = self._command_mode()
-        return torch.clamp(engage_vel, min=0., max=max_speed) * any_contact * is_walking * (~self.is_flat_terrain)
+
+        forward = quat_apply(self.base_quat, self.forward_vec)
+        heading = torch.atan2(forward[:, 1], forward[:, 0])
+        heading_error = wrap_to_pi(self.commands[:, 3] - heading)
+        heading_factor = torch.exp(-torch.square(heading_error) / self.cfg.rewards.stair_height_progress_heading_sigma)
+
+        return torch.clamp(engage_vel, min=0., max=max_speed) * any_contact * is_walking * (~self.is_flat_terrain) * heading_factor
 
     def _reward_stand_still_contact(self):
         # bonus for keeping all 4 feet planted while standing still, on any terrain
