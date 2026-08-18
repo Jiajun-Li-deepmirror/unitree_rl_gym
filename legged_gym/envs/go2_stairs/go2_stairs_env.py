@@ -92,19 +92,65 @@ class GO2StairsRobot(LeggedRobot):
         self.env_origins_grid = env_origins
 
     def _create_trimesh(self):
+        """Adds one static triangle-mesh actor PER (row, col) tile, plus 4 for the border
+        strips around the whole grid -- deliberately NOT one giant actor spanning the full
+        grid (that was the original, simpler implementation).
+
+        A single monolithic mesh here measurably breaks GPU PhysX: at num_envs>=2048 with
+        this task's ~700-900k-triangle combined grid, the GPU broadphase logs
+        "PxgDynamicsMemoryConfig::foundLostAggregatePairsCapacity ... the simulation will
+        miss interactions", and those missed interactions are exactly what caused robots to
+        gradually sink through the floor over ~15-20 steps on 3 of 4 terrain-type columns
+        (confirmed empirically: identical setup on CPU PhysX -- no GPU broadphase at all --
+        never showed this; a fresh, never-trained network already showed it on GPU, ruling
+        out any training/reward cause; and raising sim.physx.default_buffer_size_multiplier
+        by 8x had zero measurable effect, ruling that specific knob out as the fix). Splitting
+        into small per-tile pieces means a robot's broadphase queries only ever need to
+        consider its own local piece instead of the whole grid.
+
+        Only the PHYSICS/collision representation is split this way -- self.height_samples
+        (used for the CPU-side height-scan/_sample_terrain_height_at queries) stays exactly
+        the single combined array it always was, since that code path never touches PhysX
+        broadphase and splitting it would need every caller to know which piece to look in
+        for no benefit.
+        """
         cfg = self.cfg.terrain
-        vertices, triangles = terrain_utils.convert_heightfield_to_trimesh(
-            self.height_field_raw, cfg.horizontal_scale, cfg.vertical_scale, cfg.slope_treshold)
-        tm_params = gymapi.TriangleMeshParams()
-        tm_params.nb_vertices = vertices.shape[0]
-        tm_params.nb_triangles = triangles.shape[0]
-        tm_params.transform.p.x = -cfg.border_size
-        tm_params.transform.p.y = -cfg.border_size
-        tm_params.transform.p.z = 0.0
-        tm_params.static_friction = cfg.static_friction
-        tm_params.dynamic_friction = cfg.dynamic_friction
-        tm_params.restitution = cfg.restitution
-        self.gym.add_triangle_mesh(self.sim, vertices.flatten(order='C'), triangles.flatten(order='C'), tm_params)
+
+        def add_piece(row0, row1, col0, col1):
+            sub = self.height_field_raw[row0:row1, col0:col1]
+            vertices, triangles = terrain_utils.convert_heightfield_to_trimesh(
+                sub, cfg.horizontal_scale, cfg.vertical_scale, cfg.slope_treshold)
+            tm_params = gymapi.TriangleMeshParams()
+            tm_params.nb_vertices = vertices.shape[0]
+            tm_params.nb_triangles = triangles.shape[0]
+            # convert_heightfield_to_trimesh always builds LOCAL vertices starting at (0,0)
+            # for whatever sub-array it's given, so the piece's own offset (row0, col0)
+            # within the combined grid has to be added back in via the transform, on top of
+            # the same -border_size shift the original single-mesh version used (world x=0
+            # lines up with the first real tile, i.e. combined-grid row/col == self.border).
+            tm_params.transform.p.x = row0 * cfg.horizontal_scale - cfg.border_size
+            tm_params.transform.p.y = col0 * cfg.horizontal_scale - cfg.border_size
+            tm_params.transform.p.z = 0.0
+            tm_params.static_friction = cfg.static_friction
+            tm_params.dynamic_friction = cfg.dynamic_friction
+            tm_params.restitution = cfg.restitution
+            self.gym.add_triangle_mesh(self.sim, vertices.flatten(order='C'), triangles.flatten(order='C'), tm_params)
+
+        L, W, B = self.length_per_env_pixels, self.width_per_env_pixels, self.border
+        tot_rows, tot_cols = self.height_field_raw.shape
+        for i in range(cfg.num_rows):
+            for j in range(cfg.num_cols):
+                r0 = B + i * L
+                c0 = B + j * W
+                add_piece(r0, r0 + L, c0, c0 + W)
+        # border strips (flat padding around the whole tile grid): bottom/top span the full
+        # width including corners; left/right only span the tile rows, to avoid re-adding
+        # the corners a second time
+        add_piece(0, B, 0, tot_cols)
+        add_piece(tot_rows - B, tot_rows, 0, tot_cols)
+        add_piece(B, tot_rows - B, 0, B)
+        add_piece(B, tot_rows - B, tot_cols - B, tot_cols)
+
         self.height_samples = torch.tensor(self.height_field_raw, device=self.device)
 
     # ------------------------------------------------------------------
@@ -428,10 +474,20 @@ class GO2StairsRobot(LeggedRobot):
         # spawn at the top exit) -- see _reset_u_staircase_waypoints. Meaningless/unused
         # for non-u_staircase envs.
         self.waypoint_dir = torch.ones(self.num_envs, dtype=torch.long, device=self.device)
+        # this episode's actual starting waypoint index -- NOT always a true endpoint, see
+        # _reset_u_staircase_waypoints' graduated-start curriculum. Needed by
+        # _update_terrain_curriculum to measure progress relative to where THIS episode
+        # actually started, not an assumed fixed 0/(num_waypoints-1).
+        self.waypoint_start_idx = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         # set True for exactly one step, the step a waypoint is actually reached (not
         # every step it happens to already be sitting there) -- see
         # _post_physics_step_callback / _reward_waypoint_progress
         self.waypoint_advanced = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        # dense potential-based shaping companion to the sparse waypoint_advanced bonus --
+        # see _post_physics_step_callback for how these are maintained and
+        # _reward_waypoint_dist_progress for why the sparse-only signal wasn't enough
+        self.prev_waypoint_dist = torch.zeros(self.num_envs, device=self.device)
+        self.waypoint_dist_delta = torch.zeros(self.num_envs, device=self.device)
 
         # rigid body state tensor (positions/velocities of EVERY body, not just the root) --
         # the base class never acquires this since it never needs per-foot world position;
@@ -576,20 +632,47 @@ class GO2StairsRobot(LeggedRobot):
     def _u_staircase_top_height(self, rows):
         """Nominal (unjittered) height of the u_staircase's top exit platform, for a
         tensor of difficulty rows. Shared by get_u_staircase_waypoints_world (debug viz)
-        and _u_staircase_spawn_world (descending spawn) so they can't disagree."""
+        and _u_staircase_waypoint_z (spawn height for any waypoint) so they can't disagree."""
         cfg = self.cfg.terrain
         difficulty = rows.float() / max(cfg.num_rows - 1, 1)
         step_height = cfg.step_height_range[0] + difficulty * (cfg.step_height_range[1] - cfg.step_height_range[0])
         return 2 * cfg.u_staircase_num_steps * step_height
 
+    def _u_staircase_waypoint_z(self, idx, rows):
+        """Nominal world z for waypoint index `idx` (any shape, matching `rows`) on
+        difficulty row `rows` -- wp0/wp1 (entry, bottom of flight A) are at 0; wp2-wp5 (top
+        of flight A through the landing crossing back to its near edge) are at flightA_top;
+        wp6/wp7 (top of flight B, top exit) are at top_height. Shared by
+        _u_staircase_spawn_world (actual spawn height, now for an arbitrary graduated-start
+        waypoint, not just the two true endpoints) and get_u_staircase_waypoints_world
+        (debug viz) so they can't disagree."""
+        top_height = self._u_staircase_top_height(rows)
+        flightA_top = top_height / 2
+        return torch.where(idx <= 1, torch.zeros_like(flightA_top),
+                            torch.where(idx <= 5, flightA_top, top_height))
+
     def _reset_u_staircase_waypoints(self, env_ids):
         """Rolls a fresh ascend/descend direction for u_staircase envs among env_ids and
-        (re)initializes waypoint_idx/waypoint_dir to match -- ascending starts at wp0
-        (dir=+1, chases toward wp7), descending starts at wp7 (dir=-1, chases toward wp0).
-        Non-u_staircase envs just get the harmless default (idx=0, dir=+1; unused, since
-        every consumer of these two buffers is gated on on_u_staircase)."""
+        (re)initializes waypoint_idx/waypoint_dir/waypoint_start_idx to match.
+
+        The START waypoint is graduated by difficulty row, not always the true opposite
+        end: the hardest row starts at the true bottom (ascend) or top (descend) -- the
+        full real climb, matching the original design -- but easier rows start much closer
+        to the goal, requiring only a short stretch of the chain. Training data showed the
+        sparse-arrival + dense-distance rewards alone couldn't get PPO to commit to a full
+        ~3m/12-step climb with no prior success to build on; starting near the goal lets it
+        first learn "finish the last short stretch and succeed" (a quick, easy win that
+        immediately promotes it), then each subsequent row demands progressively more of
+        the chain, right up to the same full climb the hardest row always required.
+        waypoint_start_idx is persisted (not just derived from waypoint_dir) because
+        _update_terrain_curriculum needs to measure progress relative to THIS episode's
+        actual start, not assume it was always a true endpoint.
+
+        Non-u_staircase envs just get the harmless default (idx=0, dir=+1, start_idx=0;
+        unused, since every consumer of these buffers is gated on on_u_staircase)."""
         self.waypoint_dir[env_ids] = 1
         self.waypoint_idx[env_ids] = 0
+        self.waypoint_start_idx[env_ids] = 0
         u_mask = self.on_u_staircase[env_ids]
         if torch.any(u_mask):
             u_ids = env_ids[u_mask]
@@ -597,23 +680,28 @@ class GO2StairsRobot(LeggedRobot):
             descending = torch.rand(n, device=self.device) < self.cfg.terrain.u_staircase_descend_prob
             self.waypoint_dir[u_ids] = torch.where(descending, -torch.ones(n, dtype=torch.long, device=self.device),
                                                     torch.ones(n, dtype=torch.long, device=self.device))
-            self.waypoint_idx[u_ids] = torch.where(descending, torch.full((n,), self.num_waypoints - 1, device=self.device),
-                                                    torch.zeros(n, dtype=torch.long, device=self.device))
+
+            cfg = self.cfg.terrain
+            difficulty = self.terrain_levels[u_ids].float() / max(cfg.num_rows - 1, 1)
+            # at least 1 waypoint's worth of travel even at the easiest row (a genuine,
+            # if trivial, task) up to the full chain (num_waypoints-1) at the hardest
+            required_dist = torch.clamp(torch.round((self.num_waypoints - 1) * difficulty), min=1).long()
+            start_idx = torch.where(descending, required_dist, (self.num_waypoints - 1) - required_dist)
+            start_idx = torch.clamp(start_idx, 0, self.num_waypoints - 1)
+            self.waypoint_idx[u_ids] = start_idx
+            self.waypoint_start_idx[u_ids] = start_idx
 
     def _u_staircase_spawn_world(self, env_ids):
         """World xyz to spawn u_staircase envs at, matching each one's just-rolled
-        direction (see _reset_u_staircase_waypoints, which must be called first): the
-        bottom entry (wp0, z=0) if ascending, the top exit (wp7, z=nominal top height)
-        if descending."""
+        waypoint_idx (see _reset_u_staircase_waypoints, which must be called first and sets
+        this to the difficulty-graduated START index -- not always a true endpoint)."""
         cfg = self.cfg.terrain
-        at_top = self.waypoint_dir[env_ids] == -1
-        idx = torch.where(at_top, torch.full_like(self.waypoint_idx[env_ids], self.num_waypoints - 1),
-                           torch.zeros_like(self.waypoint_idx[env_ids]))
+        idx = self.waypoint_idx[env_ids]
         local_xy = self.u_staircase_wp_local[idx]
         row = self.terrain_levels[env_ids].float()
         x = row * cfg.terrain_length + local_xy[:, 0]
         y = self.u_staircase_col * cfg.terrain_width + local_xy[:, 1]
-        z = torch.where(at_top, self._u_staircase_top_height(row), torch.zeros_like(row))
+        z = self._u_staircase_waypoint_z(idx, row)
         return torch.stack([x, y, z], dim=1)
 
 
@@ -797,11 +885,23 @@ class GO2StairsRobot(LeggedRobot):
             self.gait_phase)
 
         self.waypoint_advanced[:] = False
+        self.waypoint_dist_delta[:] = 0.
         u_ids = self.on_u_staircase.nonzero(as_tuple=False).flatten()
         if len(u_ids) > 0:
             robot_xy = self.root_states[u_ids, :2]
             wp_world = self._waypoint_world(u_ids)
-            reached = torch.norm(wp_world - robot_xy, dim=1) < self.cfg.commands.waypoint_reach_threshold
+            dist_now = torch.norm(wp_world - robot_xy, dim=1)
+            # dense potential-based shaping toward the CURRENT (not-yet-advanced) target --
+            # see _reward_waypoint_dist_progress for why this is needed alongside the
+            # sparse waypoint_advanced bonus below: that bonus only pays out on actually
+            # arriving at a waypoint up to 3m/12 steps away, which turned out to give zero
+            # gradient for "making some progress but not there yet", letting training data
+            # show robots getting stuck (even sliding backward) partway up a flight with no
+            # per-step incentive to keep climbing
+            self.waypoint_dist_delta[u_ids] = self.prev_waypoint_dist[u_ids] - dist_now
+            self.prev_waypoint_dist[u_ids] = dist_now
+
+            reached = dist_now < self.cfg.commands.waypoint_reach_threshold
             # advances toward wp7 if ascending (dir=+1) or wp0 if descending (dir=-1);
             # clip is a no-op once at that end, so no separate "already at the goal" guard
             # is needed -- re-adding waypoint_dir there would just clip right back
@@ -810,6 +910,11 @@ class GO2StairsRobot(LeggedRobot):
             self.waypoint_idx[u_ids] = torch.where(reached, next_idx, self.waypoint_idx[u_ids])
 
             wp_world = self._waypoint_world(u_ids)  # re-fetch: idx may have just advanced
+            # the distance potential also has to restart relative to the NEW target the
+            # instant idx advances, or next step's delta would be a huge (and bogus)
+            # negative spike from "close to the old target" to "far from the new one"
+            self.prev_waypoint_dist[u_ids] = torch.where(reached, torch.norm(wp_world - robot_xy, dim=1),
+                                                          self.prev_waypoint_dist[u_ids])
             delta = wp_world - robot_xy
             self.commands[u_ids, 3] = torch.atan2(delta[:, 1], delta[:, 0])
 
@@ -1072,14 +1177,21 @@ class GO2StairsRobot(LeggedRobot):
 
         if torch.any(u_mask):
             u_ids = env_ids[u_mask]
-            # progress = how far idx moved from its OWN start (0 if ascending, last if
-            # descending), normalized -- direction-agnostic, uses waypoint_dir as it stood
-            # for the episode that just ended (this runs before _reset_root_states rolls a
-            # new direction for the next one)
-            start_idx = torch.where(self.waypoint_dir[u_ids] == -1,
-                                     torch.full_like(self.waypoint_idx[u_ids], self.num_waypoints - 1),
-                                     torch.zeros_like(self.waypoint_idx[u_ids])).float()
-            reached_frac = (self.waypoint_idx[u_ids].float() - start_idx).abs() / (self.num_waypoints - 1)
+            # progress = how far idx moved from its OWN actual start this episode, relative
+            # to how far it NEEDED to move to finish (goal - start) -- NOT a fixed
+            # (num_waypoints-1) denominator, since the graduated-start curriculum (see
+            # _reset_u_staircase_waypoints) means easier rows start much closer to the goal
+            # than the true opposite endpoint, and a fixed denominator would make those
+            # nearly impossible to ever register as "reached the goal" (frac >= 1.0) even
+            # after actually completing their (much shorter) required stretch. Uses
+            # waypoint_dir/waypoint_start_idx as they stood for the episode that just ended
+            # (this runs before _reset_root_states rolls fresh ones for the next episode).
+            start_idx = self.waypoint_start_idx[u_ids].float()
+            goal_idx = torch.where(self.waypoint_dir[u_ids] == -1,
+                                    torch.zeros_like(start_idx),
+                                    torch.full_like(start_idx, self.num_waypoints - 1))
+            required = (goal_idx - start_idx).abs().clamp(min=1.)
+            reached_frac = (self.waypoint_idx[u_ids].float() - start_idx).abs() / required
             move_up[u_mask] = reached_frac >= 1.0
             move_down[u_mask] = reached_frac < cfg.curriculum_demote_waypoint_frac
 
@@ -1138,6 +1250,10 @@ class GO2StairsRobot(LeggedRobot):
                 u_ids = env_ids[u_mask]
                 self.root_states[u_ids, :3] = self.base_init_state[:3] + self._u_staircase_spawn_world(u_ids)
                 self.root_states[u_ids, :2] += torch_rand_float(-jitter, jitter, (len(u_ids), 2), device=self.device)
+                # prev_waypoint_dist needs the just-set spawn xy, so this can't happen
+                # inside _reset_u_staircase_waypoints (which runs before spawn xy is set)
+                wp_world = self._waypoint_world(u_ids)
+                self.prev_waypoint_dist[u_ids] = torch.norm(wp_world - self.root_states[u_ids, :2], dim=1)
         else:
             self.root_states[env_ids] = self.base_init_state
             self.root_states[env_ids, :3] += self.env_origins[env_ids]
@@ -1316,6 +1432,22 @@ class GO2StairsRobot(LeggedRobot):
         # every other terrain type. A small assist through the awkward heading
         # transition at the landing crossing, per the original waypoint design.
         return self.waypoint_advanced.float()
+
+    def _reward_waypoint_dist_progress(self):
+        # Dense potential-based shaping companion to _reward_waypoint_progress: this pays
+        # out every step in proportion to how much closer (or, if negative, farther) the
+        # robot got to its CURRENT target waypoint since the last step -- see
+        # _post_physics_step_callback for exactly how waypoint_dist_delta is maintained
+        # (including the reset-to-zero the instant a waypoint is actually reached, so
+        # switching targets doesn't create a bogus one-step spike either direction).
+        #
+        # Added after training data showed the sparse-only bonus wasn't enough: robots got
+        # stuck partway up a 12-step/~3m flight (even sliding back down) with literally no
+        # reward gradient for "making some progress but not there yet" -- the only
+        # progress-linked signal was a single +0.5 that only pays out on fully arriving at
+        # a waypoint up to 3m away. This fills that gap with a per-step signal that scales
+        # with actual forward progress along the current leg, whatever its length.
+        return self.waypoint_dist_delta
 
     def _reward_base_height(self):
         # Overrides LeggedRobot._reward_base_height: measured relative to the LOCAL

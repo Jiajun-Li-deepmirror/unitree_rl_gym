@@ -215,6 +215,20 @@ class GO2StairsCfg(LeggedRobotCfg):
         terminate_after_contacts_on = ["base"]
         self_collisions = 1
 
+    class sim(LeggedRobotCfg.sim):
+        class physx(LeggedRobotCfg.sim.physx):
+            # base default (5) is sized for legged_gym's usual simple heightfields. Our
+            # trimesh is much bigger/less regular (a full 5x4 grid of stairs/staircase
+            # tiles, ~860k triangles after the horizontal_scale=0.05 pass) -- PhysX GPU
+            # broadphase logs "PxgDynamicsMemoryConfig::foundLostAggregatePairsCapacity"
+            # warnings ("the simulation will miss interactions") at the base default,
+            # which manifests as robots silently sinking through the floor over several
+            # steps (missed foot-ground contact pairs -> no ground reaction force that
+            # step) on exactly the terrain/row combinations whose geometry happens to
+            # stress the buffer hardest -- not a training/reward bug. Bumped well past
+            # the capacities the warning itself reported needing (up to ~18M).
+            default_buffer_size_multiplier = 40
+
     class rewards(LeggedRobotCfg.rewards):  # soft_dof_pos_limit/base_height_target from go2_config.py
         soft_dof_pos_limit = 0.9
         base_height_target = 0.25  # now used as a LOCAL (relative-to-terrain) target, only
@@ -242,7 +256,19 @@ class GO2StairsCfg(LeggedRobotCfg):
             collision = -1.0
             action_rate = -0.1
             torques = -0.0002
-            dof_pos_limits = -10.0
+            # was -10.0. With only_positive_rewards clipping the per-step total to >=0,
+            # a term this large relative to the rest (~0.02-2 in magnitude) meant any step
+            # where it fired swamped the whole sum, which then got floored to exactly 0 --
+            # identical to "did nothing wrong at all" from the policy's perspective. That
+            # erases the only signal telling it "stop pushing joints toward their limits",
+            # which matches what training data showed: dof_pos crept steadily toward the
+            # limits over the course of a rollout on 3 of 4 terrain types, and the
+            # resulting shaft_fall rate (robot's legs buckling -> root sinks below the
+            # fall-height floor) got WORSE, not better, over 450 iterations of training --
+            # not normal early-training noise, which should trend down, not up. Brought in
+            # line with the other regularization terms so it can't single-handedly zero
+            # out the whole step's reward.
+            dof_pos_limits = -1.0
             hip_pos = -0.5
             dof_error = -0.04
             feet_stumble = -1.0
@@ -253,10 +279,28 @@ class GO2StairsCfg(LeggedRobotCfg):
             feet_air_time = 0.
             feet_swing_height = -2.0
             gait_contact = 0.2
-            # u_staircase only: small sparse bonus each time a new waypoint is reached,
-            # to help early training across the awkward heading transition at the
-            # landing crossing -- see the original waypoint design discussion
-            waypoint_progress = 0.5
+            # u_staircase only: sparse bonus each time a new waypoint is reached, to help
+            # early training across the awkward heading transition at the landing crossing
+            # -- see the original waypoint design discussion. Was 0.5 -- raised 10x
+            # alongside waypoint_dist_progress: if "survive safely without really climbing"
+            # is already earning decent reward every step (see that scale's comment), the
+            # one-off payout for committing to and finishing a risky multi-second climb
+            # needs to be large enough to actually outweigh that safer alternative, not a
+            # rounding error next to it.
+            waypoint_progress = 5.0
+            # u_staircase only: dense per-step reward for closing distance to the CURRENT
+            # target waypoint (see _reward_waypoint_dist_progress) -- added after training
+            # data showed the sparse bonus alone gave no gradient across a whole 12-step/
+            # ~3m flight, letting robots get stuck (even slide backward) mid-climb.
+            # Was 5.0 -- raised 10x after the first round of training data showed net
+            # progress toward the goal over a full ~20s episode was ~0.008m (essentially
+            # zero, not just slow): tracking_lin_vel was already near its max reward the
+            # whole episode (matching COMMANDED body-frame forward velocity, satisfiable by
+            # oscillating/stepping in place without net world-space displacement) and, at
+            # the old scale, dwarfed this term's already-tiny signal, leaving PPO's gradient
+            # dominated by "keep doing whatever gets tracking_lin_vel" with essentially no
+            # pressure toward the much harder actually-climb-the-flight behavior.
+            waypoint_dist_progress = 50.0
             # gated to standing-still episodes only, and measured relative to the local
             # terrain height, not a fixed world z -- see _reward_base_height
             base_height = -1.0
@@ -271,7 +315,14 @@ class GO2StairsCfg(LeggedRobotCfg):
 
 class GO2StairsCfgPPO(LeggedRobotCfgPPO):
     class algorithm(LeggedRobotCfgPPO.algorithm):
-        entropy_coef = 0.01
+        # was 0.01. Training data showed u_staircase stuck at a stable-but-not-progressing
+        # local optimum (fall rate kept improving, near-zero net progress toward the goal
+        # never budged even after a 10x reward-scale increase) -- consistent with a
+        # risk-averse policy that found "survive safely without committing to a multi-
+        # second climb" and had no incentive strong enough to explore the riskier
+        # actually-climb behavior. A bit more entropy regularization encourages broader
+        # exploration instead of collapsing onto the first safe-looking behavior.
+        entropy_coef = 0.02
 
     class runner(LeggedRobotCfgPPO.runner):
         run_name = ''

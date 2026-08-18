@@ -67,6 +67,30 @@ def evaluate(args, min_episodes_per_bucket=DEFAULT_MIN_EPISODES_PER_BUCKET, max_
 
     obs = env.get_observations()
     num_buckets = env_cfg.terrain.num_cols * env_cfg.terrain.num_rows
+
+    # A freshly-created sim reliably reports a spurious contact-force spike on its very
+    # first physics step (a known PhysX actor-creation artifact, not a real event -- every
+    # env resets simultaneously with episode_length=0 right as the actors settle into their
+    # just-created poses). Over a full training run this is a single negligible blip lost
+    # among tens of thousands of iterations, but an eval loop is short and stops as soon as
+    # its episode-count target is hit -- with --num_envs envs all resetting at once, that
+    # one artifact alone can satisfy the whole per-bucket episode quota before any policy
+    # actually gets to demonstrate anything, silently producing a report that's entirely
+    # (or mostly) this one degenerate zero-length burst. Step past it and throw away
+    # whatever accumulated during warmup before the real measurement loop starts.
+    warmup_steps = 10
+    for _ in range(warmup_steps):
+        with torch.inference_mode():
+            actions = policy(obs.detach())
+        obs, _, _, _, _ = env.step(actions.detach())
+    env.get_and_reset_episode_report()  # discard warmup-only data (the artifact + any luck)
+
+    # Also require at least one full max_episode_length window of REAL steps before
+    # stopping, even if the per-bucket episode quota is technically hit sooner -- otherwise
+    # a burst of short/failed episodes early on can satisfy the quota while genuine
+    # full-length successful episodes (which take up to max_episode_length steps to
+    # complete) never get the chance to occur at all, biasing the report toward failures.
+    min_steps = int(env.max_episode_length)
     step = 0
     while step < max_steps:
         with torch.inference_mode():
@@ -78,7 +102,7 @@ def evaluate(args, min_episodes_per_bucket=DEFAULT_MIN_EPISODES_PER_BUCKET, max_
             covered = int((counts >= min_episodes_per_bucket).sum().item())
             print(f"[eval_go2_stairs] step {step}: {covered}/{num_buckets} buckets have "
                   f">= {min_episodes_per_bucket} episodes so far")
-            if covered == num_buckets:
+            if covered == num_buckets and step >= min_steps:
                 break
 
     report = env.get_and_reset_episode_report()
@@ -87,7 +111,12 @@ def evaluate(args, min_episodes_per_bucket=DEFAULT_MIN_EPISODES_PER_BUCKET, max_
     report['wall_time'] = time.time()
 
     out_dir = os.path.dirname(resume_path)
-    out_path = os.path.join(out_dir, f"eval_report_{os.path.basename(resume_path).replace('.pt', '')}.json")
+    # deliberately avoids the substring "model" anywhere in this filename: get_load_path's
+    # checkpoint=-1 resolution does `if 'model' in file` with no further filtering, so an
+    # eval report sitting in the same run directory as the real model_*.pt checkpoints can
+    # get misidentified as one and passed straight to torch.load -- happened once already.
+    ckpt_num = os.path.basename(resume_path).replace('model_', '').replace('.pt', '')
+    out_path = os.path.join(out_dir, f"evalreport_ckpt{ckpt_num}.json")
     with open(out_path, 'w') as f:
         json.dump(report, f, indent=2)
     print(f"[eval_go2_stairs] Wrote detailed report to {out_path}")
